@@ -266,12 +266,15 @@ module Private = struct
       (* now copy n bytes every delta bytes *)
       Printf.printf "(time %f) Copying to sparse file\n%!" (elapsed());
       let len,delta = 100,500 in
+      let count = ref 0 in
       0 |> iter_k (fun ~k off -> 
           match off+len < 1_000_000_000 with
           | true -> 
             Sparse.copy_from t ~src:large_file ~off ~len;
+            incr count;
             k (off+delta)
           | false -> ());
+      Printf.printf "(time %f) Finished; number of regions: %d\n%!" (elapsed()) !count;
       Printf.printf "(time %f) Closing sparse file\n%!" (elapsed());
       Sparse.close t;
       Printf.printf "(time %f) Finished\n%!" (elapsed());
@@ -283,6 +286,7 @@ dune exec test/test.exe
 (time 0.000106) Creating huge 1GB file /tmp/8f53c9.tmp
 (time 0.002654) Opening sparse file /tmp/e6de54.tmp
 (time 0.002677) Copying to sparse file
+(time 12.xxxxx) Finished; number of regions: 2000000
 (time 12.329643) Closing sparse file
 (time 12.589131) Finished
 
