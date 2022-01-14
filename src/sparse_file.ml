@@ -1,0 +1,276 @@
+(** An implementation of generic sparse files. *)
+
+module Private = struct
+
+  (** Essentially the Y combinator; useful for anonymous recursive
+      functions. The k argument is the recursive callExample:
+
+      {[
+        iter_k (fun ~k n -> 
+            if n = 0 then 1 else n * k (n-1))
+
+      ]}
+
+
+  *)
+  let iter_k f (x:'a) =
+    let rec k x = f ~k x in
+    k x  
+
+  module Map = Map.Make(Int)
+  
+  (** A small (fits into memory), non-volatile, int->int map *)
+  module type S1 = sig
+    type t (* = int Map.Make(Int).t *)
+    type key = int
+    type value = int
+    val empty : t
+    val add: t -> key -> value -> t
+    val find_opt : t -> key -> value option
+    val iter: t -> (key -> value -> unit) -> unit
+    val cardinal: t -> int
+    val bindings: t -> (key*value)list
+    val load: string -> t
+    val save: t -> string -> unit
+  end
+  module Small_nv_ii_map : S1 = struct
+    
+    type t = int Map.t
+
+    type key = int
+    type value = int
+
+    let empty : t = Map.empty
+                      
+    let add : t -> key -> value -> t = fun t k v -> Map.add k v t
+
+    let find_opt: t -> key -> value option = fun t k -> Map.find_opt k t 
+
+    let iter (t:t) f = Map.iter f t
+    let _ = iter
+
+    let cardinal t = Map.cardinal t
+
+    let bindings t = Map.bindings t
+
+    (** Load the map from a file; assume the file consists of (int->int) bindings *)
+    let load: string -> t = fun fn -> 
+      let sz = Unix.(stat fn |> fun st -> st.st_size) in      
+      (* check that the size is a multiple of 16 bytes, then mmap and
+         read from array *)
+      ignore(sz mod 16 = 0 || failwith "File size is not a multiple of 16");
+      let fd = Unix.(openfile fn [O_RDONLY] 0) in
+      let shared = false in
+      let mmap = Bigarray.(Unix.map_file fd Int c_layout shared [| sz |]) 
+                 |> Bigarray.array1_of_genarray
+      in
+      (* now iterate through, constructing the map *)
+      let len = Bigarray.Array1.dim mmap in
+      (0,empty) |> iter_k (fun ~k (i,m) -> 
+          match i < len with
+          | false -> m
+          | true -> 
+            let m = add m mmap.{ i } mmap.{ i+1 } in
+            k (i+2,m))
+      |> fun m ->
+      Unix.close fd;
+      m
+
+    (** Save the map to file *)
+    let save: t -> string -> unit = fun m fn ->
+      let fd = Unix.(openfile fn [O_CREAT;O_RDWR;O_TRUNC] 0o660) in
+      let shared = true in
+      let sz = Map.cardinal m in
+      let mmap = Bigarray.(Unix.map_file fd Int c_layout shared [| sz*2 |]) 
+                 |> Bigarray.array1_of_genarray
+      in
+      let i = ref 0 in
+      (* NOTE that Map.iter operates in key order, lowest first *)
+      m|> Map.iter (fun k v -> 
+          mmap.{ !i } <- k;
+          mmap.{ 1+ !i } <- v;
+          i:=!i + 2;
+          ());
+      Unix.close fd;      
+      ()                                
+  end
+  
+  (* NOTE if we write data at off1, and then rewrite some different
+     data at off1, both lots of data will be recorded in the sparse
+     file, but only the second lot of data will be accessible at off1;
+     we could add runtime checking to detect this *)
+
+  (* NOTE also that if we write n bytes at off1, and then different
+     data at off1+m, where m<n, we record both lots of data in the
+     sparse file, and each lot of data is accessible, even though this
+     sparse file does not correspond to any proper original file;
+     again we could add runtime checking to detect this *)
+
+  module Sparse = struct
+    open struct module Map_ = Small_nv_ii_map end
+
+    type t = { fn:string; fd: Unix.file_descr; mutable map:Map_.t; readonly:bool }
+
+    (* Construction functions ---- *)
+             
+    (* We create the file as fn.tmp and fn.map.tmp while constructing,
+       then promote when finished *)
+    let create fn = 
+      let fd = Unix.(openfile (fn^".tmp") [O_RDWR;O_CREAT;O_TRUNC] 0o660) in
+      { fn; fd; map=Map_.empty; readonly=false }
+      
+    (* NOTE we never rely on the seek ptr being in the right place, so
+       it is fine to side-effect alter the seek ptr *)
+    let current_offset t : int = Unix.(lseek t.fd 0 SEEK_CUR)    
+
+    let length t : int = Unix.(lseek t.fd 0 SEEK_END)
+
+    (* [map_add t off1 off2] records the binding (off1 -> off2) in the
+       offset map; off1 is the location in the original file; off2 is
+       the location in the sparse file *)
+    let map_add t off1 off2 = t.map <- Map_.add t.map off1 off2
+
+    (** [copy_from ~src ~off ~len] copies len bytes from file
+       descr. src at offset off, to the sparse file (len must not be
+       0; no other validity checks are made on off and len); a new map
+       entry is added; the lseek position in the src file is changed
+       as a side effect; before the copy starts, the sparse file seek
+       ptr is positioned at the end of the file to ensure we append to
+       the sparse file *)
+    let copy_from t ~src ~off ~len =
+      assert(len > 0);
+      let buf_sz = 4096 in
+      let buf = Bytes.create buf_sz in 
+      (* position to write at end of sparse file *)
+      ignore (Unix.(lseek t.fd 0 SEEK_END));
+      let coff = current_offset t in
+      (* perform the copy *)
+      ignore (Unix.(lseek src off SEEK_SET));
+      len |> iter_k (fun ~k len -> 
+          match len > 0 with 
+          | false -> ()
+          | true -> 
+            Unix.read src buf 0 (min buf_sz len) |> fun n' -> 
+            assert(n' > 0);
+            assert(Unix.write t.fd buf 0 n' = 0);
+            k (len - n'));
+      (* add map entry *)
+      map_add t off coff;
+      ()
+
+    let get_fd t = t.fd
+
+    (** [close t] first writes the map into file "fn.map.tmp". Then
+       "fn.tmp" is closed. Then fn.tmp is renamed to fn, and
+       fn.map.tmp is renamed to fn.map. *)
+    let close t = 
+      match t.readonly with 
+      | true -> Unix.close t.fd
+      | false -> 
+        Map_.save t.map (t.fn^".map.tmp");
+        Unix.close t.fd;
+        Unix.rename (t.fn^".tmp") t.fn;
+        Unix.rename (t.fn^".map.tmp") (t.fn^".map");
+        ()
+
+    (* Readonly functions ---- *)
+        
+    let open_ fn = 
+      assert(Sys.file_exists fn);
+      (* if we crashed before renaming fn.map.tmp to fn.map, we should
+         try to recover here *)
+      (match Sys.file_exists (fn^".map.tmp") && not (Sys.file_exists (fn^".map")) with
+       | false -> ()
+       | true -> Unix.rename (fn^".map.tmp") (fn^".map"));
+      assert(Sys.file_exists (fn^".map"));
+      let fd = Unix.(openfile fn [O_RDONLY] 0) in
+      { fn; fd; map=Map_.load (fn^".map"); readonly=true }
+
+    let map_find_opt t off1 = Map_.find_opt t.map off1
+
+    (* find the end of the region at off1, by looking in the offset
+       map to find the next highest off2; expensive; use only for
+       debug *)
+    let debug_region_end t off1 = 
+      (* take all the off2 values, and
+         find the smallest one larger than map(off1) *)
+      let off2 = 
+        map_find_opt t off1 |> function
+        | Some x -> x
+        | None -> failwith (Printf.sprintf "Unable to find offset %d in map" off1)
+      in
+      let end_ = ref Unix.(lseek t.fd 0 SEEK_END) in
+      Map_.iter t.map (fun _k v -> 
+          if v > off2 && v < !end_ then end_:=v else ());
+      !end_
+
+    (* debug pretty print *)
+    module Show = struct
+
+      (* we order by start, ie by offset in the sparse file *)
+      open Sexplib.Std
+      type region = { start: int; end_:int; off1:int; mutable data:string }[@@deriving sexp]
+
+      type region_s = region list[@@deriving sexp]
+          
+      (* from a sparse file, get a list of regions *)
+      let to_regions t = 
+        (* get sorted off2s in sparse file *)
+        Map_.bindings t.map |> fun kvs -> 
+        List.map snd kvs |> fun vs -> 
+        List.sort Int.compare vs |> fun vs -> 
+        (* now form a map from region start to region end *)
+        (vs,Map.empty) |> iter_k (fun ~k (vs,map) -> 
+            match vs with 
+            | [] -> (assert(kvs=[]);Map.empty)
+            | [off2] -> Map.add off2 (length t) map
+            | off2::off2'::rest -> k (off2'::rest,Map.add off2 off2' map))
+        |> fun end_map -> 
+        (* now iterate over all the bindings in t.map, constructing
+           the regions; leave data empty for now *)
+        Map_.bindings t.map |> fun kvs -> 
+        kvs |> List.map (fun (off1,off2) -> { start=off2; end_=Map.find off2 end_map; off1; data="" })
+        (* sort in r.start order *)
+        |> List.sort (fun r1 r2 -> Int.compare r1.start r2.start)  |> fun regs -> 
+        regs
+        
+      let to_string (regs:region_s) = 
+        Sexplib.Sexp.to_string_hum (sexp_of_region_s regs)      
+    end
+
+    let to_string = Show.to_string
+  end
+  
+
+  module Test() = struct
+    
+    (* performance test *)
+    let perf_test () =
+      (* copy 100 bytes every 100 bytes from a huge file *)
+      let fn = Filename.temp_file "" ".tmp" in
+      let large_file = 
+        (* create *)
+        assert(Sys.command (Filename.quote_command "touch" [fn]) = 0);
+        (* make huge *)
+        assert(Sys.command (Filename.quote_command "truncate" ["--size=1GB";fn]) = 0);
+        (* open *)
+        let fd = Unix.(openfile fn [O_RDONLY] 0) in
+        fd
+      in
+      (* open sparse file *)
+      let fn2 = Filename.temp_file "" ".tmp" in
+      Printf.printf "Opening sparse file %s\n%!" fn2;
+      let t = Sparse.create fn2 in
+      (* now copy n bytes every delta bytes *)
+      let len,delta = 100,500 in
+      0 |> iter_k (fun ~k off -> 
+          match off+len < 1_000_000_000 with
+          | true -> 
+            Sparse.copy_from t ~src:large_file ~off ~len;
+            k (off+delta)
+          | false -> ());
+      Sparse.close t;
+      ()
+  end
+
+end
