@@ -152,7 +152,7 @@ module Private = struct
           | true -> 
             Unix.read src buf 0 (min buf_sz len) |> fun n' -> 
             assert(n' > 0);
-            assert(Unix.write t.fd buf 0 n' = 0);
+            assert(Unix.write t.fd buf 0 n' = n');
             k (len - n'));
       (* add map entry *)
       map_add t off coff;
@@ -246,8 +246,10 @@ module Private = struct
     
     (* performance test *)
     let perf_test () =
+      let elapsed () = Mtime_clock.elapsed () |> Mtime.Span.to_s in
       (* copy 100 bytes every 100 bytes from a huge file *)
       let fn = Filename.temp_file "" ".tmp" in
+      Printf.printf "(time %f) Creating huge 1GB file %s\n%!" (elapsed()) fn;
       let large_file = 
         (* create *)
         assert(Sys.command (Filename.quote_command "touch" [fn]) = 0);
@@ -259,9 +261,10 @@ module Private = struct
       in
       (* open sparse file *)
       let fn2 = Filename.temp_file "" ".tmp" in
-      Printf.printf "Opening sparse file %s\n%!" fn2;
+      Printf.printf "(time %f) Opening sparse file %s\n%!" (elapsed()) fn2;
       let t = Sparse.create fn2 in
       (* now copy n bytes every delta bytes *)
+      Printf.printf "(time %f) Copying to sparse file\n%!" (elapsed());
       let len,delta = 100,500 in
       0 |> iter_k (fun ~k off -> 
           match off+len < 1_000_000_000 with
@@ -269,8 +272,26 @@ module Private = struct
             Sparse.copy_from t ~src:large_file ~off ~len;
             k (off+delta)
           | false -> ());
+      Printf.printf "(time %f) Closing sparse file\n%!" (elapsed());
       Sparse.close t;
+      Printf.printf "(time %f) Finished\n%!" (elapsed());
       ()
+      
+    (* typical run: 
+
+dune exec test/test.exe
+(time 0.000106) Creating huge 1GB file /tmp/8f53c9.tmp
+(time 0.002654) Opening sparse file /tmp/e6de54.tmp
+(time 0.002677) Copying to sparse file
+(time 12.329643) Closing sparse file
+(time 12.589131) Finished
+
+ls -al /tmp/
+  -rw-rw----  1 tom  tom  191M Jan 14 17:15 e6de54.tmp
+  -rw-rw----  1 tom  tom   31M Jan 14 17:15 e6de54.tmp.map
+
+    *)
+
   end
 
 end

@@ -1,1 +1,3 @@
-let _ = Sparse_file.Private.Test().perf_test()
+let _ = 
+  let open Sparse_file.Private.Test() in
+  perf_test()

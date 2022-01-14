@@ -2,5 +2,5 @@
  (name "sparse_file")
  (public_name "sparse-file")
  (preprocess (pps ppx_sexp_conv))
- (libraries sexplib))
+ (libraries sexplib mtime mtime.clock mtime.clock.os))
 
