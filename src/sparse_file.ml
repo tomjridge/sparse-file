@@ -1,21 +1,32 @@
 (** An implementation of generic sparse files. *)
 
+(**
+
+NOTE there is a "region manager" whose job is to coalesce regions, and
+check subregions are not added twice. This should be used to calculate
+the set of regions which are then copied to the sparse file.
+
+{2 Use of the sparse file} 
+
+When we come to use the sparse file, in our setting, we should never
+touch any of the "gap" regions. For example, for the sparse file:
+
+{[ [aaa][000][bbb]... ]}
+
+If we copy from the "a" region, we can either start at the beginning,
+or somewhere in the middle, and copy up to the end, but we should
+never copy bytes from the following "0" region.
+
+At the moment, this is not enforced by the sparse file. The region
+manager cannot enforce this either, because the region manager is
+concerned only with the creation of the sparse file, not the
+subsequent copying from the sparse file.
+
+*)
+
+open Util
+
 module Private = struct
-
-  (** Essentially the Y combinator; useful for anonymous recursive
-      functions. The k argument is the recursive callExample:
-
-      {[
-        iter_k (fun ~k n -> 
-            if n = 0 then 1 else n * k (n-1))
-
-      ]}
-
-
-  *)
-  let iter_k f (x:'a) =
-    let rec k x = f ~k x in
-    k x  
 
   module Map = Map.Make(Int)
   
