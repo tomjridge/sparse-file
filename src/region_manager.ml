@@ -21,7 +21,7 @@ This has two adjacent regions (b and c). We want to replace this with
 a single region [[bbbccc]] (because this is more efficient when we do
 the actual copy to the sparse file; and because we maybe want to
 allow, for example, copying a part of that region which overlaps the b
-region and the c region).
+data and the c data).
 
 In short, we want:
 
@@ -30,7 +30,8 @@ are no 2 adjacent regions (such as [ [bbb][ccc] ]).
 
 INVARIANT (is-wellformed): the sparse file is wellformed in the sense that, for any
 region [(off,len)], there are no other regions which start within the
-range [(off,len)] (alternatively: any non-0 byte is contained in exactly one region).
+range [(off,len)] (alternatively: any non-sparse-position in the
+sparse file is contained in exactly one region).
 
 NOTE that adding a region may require coalescing a region immediately
 before, or after, or both.
