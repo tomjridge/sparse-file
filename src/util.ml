@@ -101,6 +101,10 @@ module Add_load_save_funs(S:sig type t[@@deriving sexp] end) = struct
   let save t fn = Sexplib.Sexp.save_hum fn (t |> sexp_of_t)
 
   let load fn = Sexplib.Sexp.load_sexp fn |> t_of_sexp
+
+  let to_string t = Sexplib.Sexp.to_string_hum (t |> sexp_of_t)
+      
+  let to_bytes t = t |> to_string |> Bytes.unsafe_of_string
 end
 
 (** Printf abbreviations *)

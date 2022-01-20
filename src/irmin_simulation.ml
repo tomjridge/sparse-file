@@ -1,18 +1,8 @@
 (** A pretend version of irmin/Tezos *)
 
-open Util
+[@@@warning "-27"](* FIXME remove *)
 
-(** Irmin-like objects; can refer to older objects; typically
-   persisted in a file before creating another object (FIXME how is
-   this invariant enforced in Irmin, that an older object appears
-   earlier in the data file?) *)
-type irmin_obj = {
-  children : irmin_obj list; 
-  id       : int; (* each obj has an id, for debugging *)
-  off      : int option; 
-  (* each obj may be persisted, in which case there is an offset in
-     the file where the obj is stored *)
-}
+open Util
 
 
 (** A control file, which records various bits of information about
@@ -107,3 +97,128 @@ module IO = struct
         Ok len                   
                    
 end
+
+
+
+module Irmin_obj = struct
+
+  (** Irmin-like objects; can refer to older objects; typically
+      persisted in a file before creating another object (FIXME how is
+      this invariant enforced in Irmin, that an older object appears
+      earlier in the data file?) *)
+  type t = {
+    id        : int; (* each obj has an id, for debugging *)
+    typ       : [ `Normal | `Commit ];
+    ancestors : t list; 
+    mutable off : int option; 
+    (* each obj may be persisted, in which case there is an offset in
+       the file where the obj is stored; if an offset is Some, then all
+       ancestors must also have been written to disk, so their offsets
+       will also be Some *)
+  }
+
+  let is_saved obj = obj.off <> None
+  
+  module On_disk = struct
+    open Sexplib.Std
+    module T = struct
+      type t = {
+        id: int;
+        typ       : [ `Normal | `Commit ];
+        ancestors : int list; (* list of offsets *)
+      }[@@deriving sexp]
+    end
+    include T
+    include Add_load_save_funs(T)
+  end
+
+  let get_off obj = obj.off |> Option.get
+
+  let save io (obj:t) = 
+    assert(obj.ancestors |> List.for_all is_saved);
+    let { id;typ;ancestors; _ } = obj in
+    let obj : On_disk.t = { id; typ; ancestors=List.map get_off ancestors } in
+    IO.append io (On_disk.to_bytes obj);
+    ()
+end
+open Irmin_obj
+
+type irmin_obj = Irmin_obj.t
+
+(** We simulate Irmin: the main process creates a new object every
+   second, with references to log(n) previous objects, where some
+   references can be to the same object. Objects are written to
+   disk. Some objects are "commits"; they tend to reference many
+   objects; future objects can only reference objects reachable from
+   the most recent commit. At some point a recent commit is selected
+   and GC is performed on objects earlier than the commit: only
+   objects reachable from the commit are maintained. The GC is
+   triggered periodically, happens in another process, and should not
+   interrupt the main process.  *)
+module Simulation = struct
+
+  type irmin_obj_set = (int,irmin_obj) Hashtbl.t
+  
+  type t = {
+    io: IO.t;
+    mutable clock: int;
+    mutable min_free_id : int;
+    mutable last_commit: irmin_obj option;
+    mutable last_commit_objs: irmin_obj_set;
+    (** Reachable objects from last commit *)
+  }
+
+  let calc_reachable obj = 
+    let set = Hashtbl.create 1000 in
+    let rec go obj = 
+      Hashtbl.mem set obj.id |> function
+      | true -> (* already traversed *)
+        ()
+      | false -> 
+        (* traverse ancestors first *)
+        obj.ancestors |> List.iter go;
+        Hashtbl.add set obj.id obj;
+        ()
+    in
+    go obj;
+    set
+
+
+  let save_object t obj =
+    let off = IO.size t.io in
+    obj.off <- Some off;
+    
+
+  module Step = struct
+     let gc t =
+       match t.last_commit with 
+       | None -> ()
+       | Some obj -> 
+         (* we know reachable objects from t.last_commit_objs *)
+         ()
+        
+     let create_commit t = ()
+
+     let create_object t = ()
+   end
+  open Step
+
+  let step t =    
+    (* choose whether to create a commit, a normal object, or initiate
+       GC wrt the last commit *)
+    t.clock <- t.clock +1;
+    match t.clock with
+    | _ when t.clock mod 30 = 0 -> 
+      (* GC *)
+      gc t
+    | _ when t.clock mod 20 = 0 -> 
+      (* create a commit *)
+      create_commit t
+    | _ -> 
+      (* create a new object *)
+      create_object t
+
+  
+
+end
+
