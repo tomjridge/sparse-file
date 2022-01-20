@@ -107,14 +107,14 @@ module Private = struct
     *)
     val append_region: t -> src:fd -> src_off:int -> len:int -> virt_off:int -> unit
 
-    (** [find_vreg ~virt_off ~len] returns [Some real_off] to indicate
+    (** [translate_vreg ~virt_off ~len] returns [Some real_off] to indicate
        that the virtual region [(virt_off,len)] maps to the real
        region [(real_off,len)].  Returns None if the virtual region is
        only partially contained in the sparse file, or not contained
        at all. NOTE it is expected that None is treated like an error,
        since the user should never be accessing a sparse file region
        which doesn't exist.  *)
-    val find_vreg: t -> virt_off:int -> len:int -> real_off option
+    val translate_vreg: t -> virt_off:int -> len:int -> real_off option
 
 
     (** Debugging *)
@@ -182,7 +182,7 @@ module Private = struct
       map_add t ~virt_off ~real_off ~len;
       ()
       
-    let find_vreg t ~virt_off ~len = 
+    let translate_vreg t ~virt_off ~len = 
       Map_.find_last_opt (fun off' -> off' <= virt_off) t.map |> function
       | None ->
         log (P.s "%s: No virtual offset found <= %d" __FILE__ virt_off);

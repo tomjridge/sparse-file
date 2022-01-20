@@ -89,13 +89,21 @@ module IO = struct
 
   let append t bs = t.upper.append bs
 
-  let pread t : off:int ref -> len:int -> buf:bytes -> int = 
+  let pread t : off:int ref -> len:int -> buf:bytes -> (int,unit) result = 
     fun ~off ~len ~buf ->
     match !off >= t.upper.suffix_offset with
-    | true -> t.upper.pread ~off ~len ~buf
+    | true -> Ok (t.upper.pread ~off ~len ~buf)
     | false -> 
       (* need to pread in the sparse file *)
-      Sparse.pread ~off ~len ~buf      
-                   
+      Sparse.translate_vreg t.sparse ~virt_off:!off ~len |> function
+      | None -> 
+        (* can't find the requested region in the sparse file *)
+        Error ()
+      | Some roff ->
+        (* can read from sparse file at real offset roff *)
+        File.fd_to_file t.sparse.fd |> fun file -> 
+        assert(file.pread ~off:(ref roff) ~len ~buf = len);
+        off:=!off + len;
+        Ok len                   
                    
 end
