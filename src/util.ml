@@ -49,76 +49,62 @@ module Small_int_file = struct
     ()                                
 end
 
+module Int_map = Map.Make(Int)
 
+(** A small (fits into memory), non-volatile, int->int map *)
 module Small_int_int_map = struct
+  module Map_ = Int_map
+  type t = int Map_.t
 
-  module Private = struct
-    module Map = Map.Make(Int)
+  let empty : t = Map_.empty
+  let add = Map_.add
+  let find_opt = Map_.find_opt
+  let iter = Map_.iter
+  let bindings = Map_.bindings
+  let find_last_opt = Map_.find_last_opt
 
-    (** A small (fits into memory), non-volatile, int->int map *)
-    module type S1 = sig
-      type t (* = int Map.Make(Int).t *)
-      type key = int
-      type value = int
-      val empty : t
-      val add: t -> key -> value -> t
-      val find_opt : t -> key -> value option
-      val iter: t -> (key -> value -> unit) -> unit
-      val cardinal: t -> int
-      val bindings: t -> (key*value)list
-      val load: string -> t
-      val save: t -> string -> unit
-    end
-    module Small_nv_ii_map : S1 = struct
+  (** Load the map from a file; assume the file consists of (int->int) bindings *)
+  let load: string -> t = fun fn -> 
+    let sz = Unix.(stat fn |> fun st -> st.st_size) in      
+    (* check that the size is a multiple of 16 bytes, then mmap and
+       read from array *)
+    ignore(sz mod 16 = 0 || failwith "File size is not a multiple of 16");
+    let mmap = Small_int_file.load fn in
+    (* now iterate through, constructing the map *)
+    let len = Bigarray.Array1.dim mmap in
+    (0,Map_.empty) |> iter_k (fun ~k (i,m) -> 
+        match i < len with
+        | false -> m
+        | true -> 
+          let m = Map_.add mmap.{ i } mmap.{ i+1 } m in
+          k (i+2,m))
+    |> fun m ->
+    m
 
-      type t = int Map.t
+  (** Save the map to file *)
+  let save: t -> string -> unit = fun m fn ->
+    let ints = 
+      let x = ref [] in
+      m |> Map_.iter (fun k v -> x:=k::v::!x);
+      !x
+    in
+    Small_int_file.save ints fn
+end
 
-      type key = int
-      type value = int
 
-      let empty : t = Map.empty
+let log s = print_endline s
 
-      let add : t -> key -> value -> t = fun t k v -> Map.add k v t
 
-      let find_opt: t -> key -> value option = fun t k -> Map.find_opt k t 
+module Add_load_save_funs(S:sig type t[@@deriving sexp] end) = struct
+  open S
 
-      let iter (t:t) f = Map.iter f t
-      let _ = iter
+  let save t fn = Sexplib.Sexp.save_hum fn (t |> sexp_of_t)
 
-      let cardinal t = Map.cardinal t
+  let load fn = Sexplib.Sexp.load_sexp fn |> t_of_sexp
+end
 
-      let bindings t = Map.bindings t
-
-      (** Load the map from a file; assume the file consists of (int->int) bindings *)
-      let load: string -> t = fun fn -> 
-        let sz = Unix.(stat fn |> fun st -> st.st_size) in      
-        (* check that the size is a multiple of 16 bytes, then mmap and
-           read from array *)
-        ignore(sz mod 16 = 0 || failwith "File size is not a multiple of 16");
-        let mmap = Small_int_file.load fn in
-        (* now iterate through, constructing the map *)
-        let len = Bigarray.Array1.dim mmap in
-        (0,empty) |> iter_k (fun ~k (i,m) -> 
-            match i < len with
-            | false -> m
-            | true -> 
-              let m = add m mmap.{ i } mmap.{ i+1 } in
-              k (i+2,m))
-        |> fun m ->
-        m
-
-      (** Save the map to file *)
-      let save: t -> string -> unit = fun m fn ->
-        let ints = 
-          let x = ref [] in
-          m |> Map.iter (fun k v -> x:=k::v::!x);
-          !x
-        in
-        Small_int_file.save ints fn
-    end
-
-  end
-
-  include Private.Small_nv_ii_map
-
+(** Printf abbreviations *)
+module P = struct
+  include Printf
+  let s = sprintf 
 end

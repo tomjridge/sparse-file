@@ -20,6 +20,8 @@ type file = {
   pwrite_string    : off:int ref -> string -> unit;
   pwrite_substring : off:int ref -> str:string -> str_off:int -> str_len:int -> unit;
   pread            : off:int ref -> len:int -> buf:bytes -> int; 
+  (** pread assumes len <= length(buf) *)
+
   (** returns the actual number of bytes read *)
   pread_string     : off:int ref -> len:int -> string;    
 }
@@ -94,14 +96,8 @@ module Private_file = struct
     include With_pread(struct let pread = pread end)
 
     let append buf = pwrite ~off:(ref (size ())) buf
-  end
 
-  let open' flgs fn = 
-    Unix.openfile fn flgs 0o660 |> fun fd ->
-    let open With_fd (struct
-        let fd = fd
-      end) in
-    {
+    let ops = {
       close;
       append;
       fsync;
@@ -112,13 +108,27 @@ module Private_file = struct
       pread;
       pread_string;
     }
+  end
+
+  let open' flgs fn = 
+    Unix.openfile fn flgs 0o660 |> fun fd ->
+    let open With_fd (struct
+        let fd = fd
+      end) in
+    ops
+
+  let fd_to_file fd = 
+    let open With_fd (struct
+        let fd = fd
+      end) in
+    ops
 
   let create_file fn = open' [ O_CREAT; O_EXCL; O_RDWR ] fn
 
   let open_file fn = open' [ O_RDWR ] fn
 end
 
-let create_file,open_file = Private_file.(create_file,open_file)
+let fd_to_file,create_file,open_file = Private_file.(fd_to_file,create_file,open_file)
 
 
 (** {2 Suffix file} *)
@@ -216,4 +226,18 @@ module Private_suffix_file = struct
   let open_suffix_file ~suffix_offset fn = 
     open' [ O_RDWR ] ~suffix_offset fn
 
+  (** We usually want to store the offset in another file *)
+  module Offset_util = struct
+    module T = struct open Sexplib.Std type t = {off:int}[@@deriving sexp] end
+    include T
+    include Add_load_save_funs(T)
+  end
+
+  let save_offset ~off fn = Offset_util.(save {off} fn)
+  let load_offset fn = Offset_util.(load fn).off
 end
+
+let create_suffix_file,open_suffix_file = Private_suffix_file.(create_suffix_file,open_suffix_file)
+
+let save_offset,load_offset = Private_suffix_file.(save_offset,load_offset)
+

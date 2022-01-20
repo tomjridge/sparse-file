@@ -17,16 +17,109 @@ If we copy from the "a" region, we can either start at the beginning,
 or somewhere in the middle, and copy up to the end, but we should
 never copy bytes from the following "0" region.
 
-At the moment, this is not enforced by the sparse file. The region
-manager cannot enforce this either, because the region manager is
-concerned only with the creation of the sparse file, not the
-subsequent copying from the sparse file.
+At the moment, this is enforced by the sparse file: attempting to use
+[find_vreg] to translate a virtual region to a real region in the
+sparse file will return None. The region manager cannot enforce this
+either, because the region manager is concerned only with the creation
+of the sparse file, not the subsequent copying from the sparse file.
 
+*)
+
+(* TODO: 
+
+- X maintain a map of virt_off->(real_off,len)
+- X ability to read within a region
+- strengthen invariants eg no double entries for a given offset
 *)
 
 open Util
 
 module Private = struct
+
+  type map = (int * int) Int_map.t
+
+  module Map_ = struct
+    include Int_map
+    let load fn = 
+      assert(Sys.file_exists fn);
+      assert( (Unix.stat fn).st_size mod (3*8) = 0 ||
+              failwith (P.s 
+                          "%s: attempted to load int->int*int map \
+                           whose size was not a multiple of 3*8" __FILE__));
+      let arr = Small_int_file.load fn in
+      (0,empty) |> iter_k (fun ~k (i,m) -> 
+          match i < Bigarray.Array1.dim arr with
+          | true -> 
+            let m = add arr.{i} (arr.{i+1},arr.{i+2}) m in
+            k (i+3,m)
+          | false -> m)
+
+    let save t fn = 
+      let x = ref [] in
+      t |> bindings |> List.iter (fun (voff,(off,len)) -> x:= voff::off::len::!x);
+      Small_int_file.save !x fn
+  end
+
+
+  module type SPARSE = sig
+    
+    (* type virt_off := int *)
+    type real_off := int
+    (* type len := int *)
+    type fd := Unix.file_descr
+
+    (** The [fd] component is available for reading regions found via
+       [find_vreg] *)
+    type t = private { fd:fd; mutable map:map; readonly:bool }
+
+    val create: string -> t
+      
+    (** Open the sparse file, with the given map from virtual offset to real offset *)
+    val open_ro : map_fn:string -> string -> t
+
+    (** Explicitly save the map; the map is not automatically saved -
+       it is up to the user to remember to save any updated map before
+       closing the file. *)
+    val save_map: t -> map_fn:string -> unit
+
+    (** [close t] closes the underlying fd; this does not ensure the
+        map is saved; use [save_map] for that. *)
+    val close: t -> unit
+
+    (** [map_add ~virt_off ~real_off ~len] adds a binding from virtual
+       region [(virt_off,len)] to real region [(real_off,len)] *)
+    val map_add: t -> virt_off:int -> real_off:int -> len:int -> unit
+
+    (** [append_region t ~src ~src_off ~len ~virt_off] appends len bytes
+        from fd [src] at offset [src_off], to the end of sparse file t.
+
+        [len] must not be 0; no other validity checks are made on off
+        and len.
+
+        A new map entry [virt_off -> (real_off,len)] is added, where
+        real_off was the real offset of the end of the sparse file
+        before the copy took place.
+
+        The lseek position in the src file is changed as a side
+        effect; before the copy starts, the sparse file seek ptr is
+        positioned at the end of the file to ensure we append to the
+        sparse file.
+    *)
+    val append_region: t -> src:fd -> src_off:int -> len:int -> virt_off:int -> unit
+
+    (** [find_vreg ~virt_off ~len] returns [Some real_off] to indicate
+       that the virtual region [(virt_off,len)] maps to the real
+       region [(real_off,len)].  Returns None if the virtual region is
+       only partially contained in the sparse file, or not contained
+       at all. NOTE it is expected that None is treated like an error,
+       since the user should never be accessing a sparse file region
+       which doesn't exist.  *)
+    val find_vreg: t -> virt_off:int -> len:int -> real_off option
+
+
+    (** Debugging *)
+    val to_string: t -> string
+  end
 
   
   (* NOTE if we write data at off1, and then rewrite some different
@@ -41,45 +134,42 @@ module Private = struct
      again we could add runtime checking to detect this *)
 
   module Sparse = struct
-    open struct module Map_ = Small_int_int_map end
 
-    type t = { fn:string; fd: Unix.file_descr; mutable map:Map_.t; readonly:bool }
-
+    type t = { 
+      fd          : Unix.file_descr; 
+      mutable map : map; 
+      readonly    : bool 
+    }
+    
     (* Construction functions ---- *)
              
     (* We create the file as fn.tmp and fn.map.tmp while constructing,
        then promote when finished *)
     let create fn = 
-      let fd = Unix.(openfile (fn^".tmp") [O_RDWR;O_CREAT;O_TRUNC] 0o660) in
-      { fn; fd; map=Map_.empty; readonly=false }
-      
-    (* NOTE we never rely on the seek ptr being in the right place, so
-       it is fine to side-effect alter the seek ptr *)
-    let current_offset t : int = Unix.(lseek t.fd 0 SEEK_CUR)    
+      let fd = Unix.(openfile fn [O_RDWR;O_CREAT;O_TRUNC] 0o660) in
+      { fd; map=Map_.empty; readonly=false }
 
-    let length t : int = Unix.(lseek t.fd 0 SEEK_END)
+    let open_ro ~map_fn fn = 
+      assert(Sys.file_exists fn);
+      assert(Sys.file_exists map_fn);
+      let fd = Unix.(openfile fn [O_RDONLY] 0) in
+      let map = Map_.load map_fn in
+      { fd; map; readonly=true }
 
-    (* [map_add t off1 off2] records the binding (off1 -> off2) in the
-       offset map; off1 is the location in the original file; off2 is
-       the location in the sparse file *)
-    let map_add t off1 off2 = t.map <- Map_.add t.map off1 off2
+    let save_map t ~map_fn = Map_.save t.map map_fn
 
-    (** [copy_from ~src ~off ~len] copies len bytes from file
-       descr. src at offset off, to the sparse file (len must not be
-       0; no other validity checks are made on off and len); a new map
-       entry is added; the lseek position in the src file is changed
-       as a side effect; before the copy starts, the sparse file seek
-       ptr is positioned at the end of the file to ensure we append to
-       the sparse file *)
-    let copy_from t ~src ~off ~len =
+    let close t = Unix.close t.fd
+
+    let map_add t ~virt_off ~real_off ~len = t.map <- Map_.add virt_off (real_off,len) t.map
+
+    let append_region t ~src ~src_off ~len ~virt_off =
       assert(len > 0);
       let buf_sz = 4096 in
       let buf = Bytes.create buf_sz in 
-      (* position to write at end of sparse file *)
-      ignore (Unix.(lseek t.fd 0 SEEK_END));
-      let coff = current_offset t in
-      (* perform the copy *)
-      ignore (Unix.(lseek src off SEEK_SET));
+      (* seek to end of sparse file *)
+      let real_off = Unix.(lseek t.fd 0 SEEK_END) in
+      (* perform the copy; first seek in src *)
+      ignore (Unix.(lseek src src_off SEEK_SET));
       len |> iter_k (fun ~k len -> 
           match len > 0 with 
           | false -> ()
@@ -89,94 +179,68 @@ module Private = struct
             assert(Unix.write t.fd buf 0 n' = n');
             k (len - n'));
       (* add map entry *)
-      map_add t off coff;
+      map_add t ~virt_off ~real_off ~len;
       ()
+      
+    let find_vreg t ~virt_off ~len = 
+      Map_.find_last_opt (fun off' -> off' <= virt_off) t.map |> function
+      | None ->
+        log (P.s "%s: No virtual offset found <= %d" __FILE__ virt_off);
+        None
+      | Some (voff',(roff',len')) -> 
+        (* NOTE things from the map are primed; voff'<=virt_off *)
+        (* virtual      ,real
+           voff'        ,roff'
+           virt_off     ,roff' + (virt_off - voff')
+           virt_off+len ,roff' + (virt_off - voff') + len
+        *)                      
+        let delta = virt_off - voff' in
+        (* we can read from the real region provided: roff' + delta
+           + len <= roff' + len'; ie delta + len <= len' *)
+        match delta + len <= len' with
+        | false -> 
+          log (P.s "%s: sparse region (%d,%d) does not contain enough \
+                    bytes to read region (%d,%d)" __FILE__ roff' len' virt_off len);
+          None    
+        | true -> 
+          Some(roff'+delta)      
 
-    let get_fd t = t.fd
 
-    (** [close t] first writes the map into file "fn.map.tmp". Then
-       "fn.tmp" is closed. Then fn.tmp is renamed to fn, and
-       fn.map.tmp is renamed to fn.map. *)
-    let close t = 
-      match t.readonly with 
-      | true -> Unix.close t.fd
-      | false -> 
-        Map_.save t.map (t.fn^".map.tmp");
-        Unix.close t.fd;
-        Unix.rename (t.fn^".tmp") t.fn;
-        Unix.rename (t.fn^".map.tmp") (t.fn^".map");
-        ()
-
-    (* Readonly functions ---- *)
-        
-    let open_ fn = 
-      assert(Sys.file_exists fn);
-      (* if we crashed before renaming fn.map.tmp to fn.map, we should
-         try to recover here *)
-      (match Sys.file_exists (fn^".map.tmp") && not (Sys.file_exists (fn^".map")) with
-       | false -> ()
-       | true -> Unix.rename (fn^".map.tmp") (fn^".map"));
-      assert(Sys.file_exists (fn^".map"));
-      let fd = Unix.(openfile fn [O_RDONLY] 0) in
-      { fn; fd; map=Map_.load (fn^".map"); readonly=true }
-
-    let map_find_opt t off1 = Map_.find_opt t.map off1
-
-    (* find the end of the region at off1, by looking in the offset
-       map to find the next highest off2; expensive; use only for
-       debug *)
-    let debug_region_end t off1 = 
-      (* take all the off2 values, and
-         find the smallest one larger than map(off1) *)
-      let off2 = 
-        map_find_opt t off1 |> function
-        | Some x -> x
-        | None -> failwith (Printf.sprintf "Unable to find offset %d in map" off1)
-      in
-      let end_ = ref Unix.(lseek t.fd 0 SEEK_END) in
-      Map_.iter t.map (fun _k v -> 
-          if v > off2 && v < !end_ then end_:=v else ());
-      !end_
-
-    (* debug pretty print *)
-    module Show = struct
-
-      (* we order by start, ie by offset in the sparse file *)
-      open Sexplib.Std
-      type region = { start: int; end_:int; off1:int; mutable data:string }[@@deriving sexp]
-
-      type region_s = region list[@@deriving sexp]
-
-      module Map_i = Map.Make(Int)
-          
-      (* from a sparse file, get a list of regions *)
-      let to_regions t = 
-        (* get sorted off2s in sparse file *)
-        Map_.bindings t.map |> fun kvs -> 
-        List.map snd kvs |> fun vs -> 
-        List.sort Int.compare vs |> fun vs -> 
-        (* now form a map from region start to region end *)
-        (vs,Map_i.empty) |> iter_k (fun ~k (vs,map) -> 
-            match vs with 
-            | [] -> (assert(kvs=[]);Map_i.empty)
-            | [off2] -> Map_i.add off2 (length t) map
-            | off2::off2'::rest -> k (off2'::rest,Map_i.add off2 off2' map))
-        |> fun end_map -> 
-        (* now iterate over all the bindings in t.map, constructing
-           the regions; leave data empty for now *)
-        Map_.bindings t.map |> fun kvs -> 
-        kvs |> List.map (fun (off1,off2) -> { start=off2; end_=Map_i.find off2 end_map; off1; data="" })
-        (* sort in r.start order *)
-        |> List.sort (fun r1 r2 -> Int.compare r1.start r2.start)  |> fun regs -> 
-        regs
-        
-      let to_string (regs:region_s) = 
-        Sexplib.Sexp.to_string_hum (sexp_of_region_s regs)      
-    end
-
-    let to_string = Show.to_string
+    let pp_ref = ref (fun _ -> failwith "unpatched")
+    let to_string (t:t) : string = !pp_ref t
+    
   end
-  
+
+
+  (** Debug module, providing conversion of sparse file into string repr *)
+  module Debug = struct
+    open Sparse
+
+    (* we order regions by roff in the sparse file *)
+    open Sexplib.Std
+    type region = { roff:int; len:int; voff:int; mutable data:string }[@@deriving sexp]
+
+    type region_s = region list[@@deriving sexp]
+              
+    (* from a sparse file, get a list of regions *)
+    let to_regions t = 
+      let file = File.fd_to_file t.fd in
+      Map_.bindings t.map |> 
+      List.map (fun (v,(r,l)) -> { roff=r; len=l; voff=v; data=""} ) |> 
+      List.sort (fun r1 r2 -> Int.compare r1.roff r2.roff) |> 
+      List.map (fun r -> 
+          (* read some data from the region *)
+          let len = min 8 r.len in
+          let data = file.pread_string ~off:(ref r.roff) ~len in
+          r.data <- data;
+          r) 
+        
+    let to_string t  = 
+      t |> to_regions |> sexp_of_region_s |> Sexplib.Sexp.to_string_hum 
+
+    let _ = Sparse.pp_ref := to_string
+  end
+    
 
   module Test() = struct
     
@@ -203,12 +267,12 @@ module Private = struct
       Printf.printf "(time %f) Copying to sparse file\n%!" (elapsed());
       let len,delta = 100,500 in
       let count = ref 0 in
-      0 |> iter_k (fun ~k off -> 
-          match off+len < 1_000_000_000 with
+      0 |> iter_k (fun ~k src_off -> 
+          match src_off+len < 1_000_000_000 with
           | true -> 
-            Sparse.copy_from t ~src:large_file ~off ~len;
+            Sparse.append_region t ~src:large_file ~src_off ~len ~virt_off:src_off;
             incr count;
-            k (off+delta)
+            k (src_off+delta)
           | false -> ());
       Printf.printf "(time %f) Finished; number of regions: %d\n%!" (elapsed()) !count;
       Printf.printf "(time %f) Closing sparse file\n%!" (elapsed());
@@ -237,3 +301,34 @@ ls -al /tmp/
 end
 
 include Private.Sparse
+
+
+
+
+
+(*
+    (* find the end of the region at off1, by looking in the offset
+       map to find the next highest off2; expensive; use only for
+       debug *)
+    let debug_region_end t off1 = 
+      (* take all the off2 values, and
+         find the smallest one larger than map(off1) *)
+      let off2 = 
+        map_find_opt t off1 |> function
+        | Some x -> x
+        | None -> failwith (Printf.sprintf "Unable to find offset %d in map" off1)
+      in
+      let end_ = ref Unix.(lseek t.fd 0 SEEK_END) in
+      t.map |> Map_.iter (fun _k v -> 
+          if v > off2 && v < !end_ then end_:=v else ());
+      !end_
+*)
+
+
+(*
+    (* debug pretty print *)
+    module Show = struct
+
+
+    let to_string = Show.to_string
+*)
