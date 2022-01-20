@@ -8,5 +8,5 @@ let _ =
 
 (* always perform this test *)
 let _ = 
-  let open Sparse_file__.Region_manager.Test() in
+  let open Region_manager.Test() in
   ()

@@ -1,5 +1,5 @@
 (lang dune 2.0)
-(name sparse-file)
+(name sparse-file-pkg)
 
 ;; for opam
 (authors "Tom Ridge <tom.j.ridge@googlemail.com>")
@@ -11,7 +11,7 @@
 
 
 (package 
- (name sparse-file)
+ (name sparse-file-pkg)
  (synopsis "FIXME")
  (depends))
 

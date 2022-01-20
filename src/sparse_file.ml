@@ -310,3 +310,5 @@ ls -al /tmp/
   end
 
 end
+
+include Private.Sparse

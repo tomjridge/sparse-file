@@ -1,4 +1,7 @@
+(env 
+  (_ (flags (:standard 
+              -open Sparse_file_lib))))
 (executable
  (name test)
- (modules test)
- (libraries sparse_file)) 
+ (modules test) 
+ (libraries sparse_file_lib)) 
