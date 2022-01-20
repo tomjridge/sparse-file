@@ -14,9 +14,13 @@ module IO = struct
   type upper = File.suffix_file
   type sparse = Sparse_file.t
 
+  module Sparse = Sparse_file
+
   (* NOTE fields are mutable because we swap them out at some point *)
   type t = { mutable sparse:sparse; mutable upper:upper; }
 
-  
-
+(*
+  let open_ fn = 
+    let sparse = 
+*)
 end

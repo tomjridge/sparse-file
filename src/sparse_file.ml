@@ -28,83 +28,6 @@ open Util
 
 module Private = struct
 
-  module Map = Map.Make(Int)
-  
-  (** A small (fits into memory), non-volatile, int->int map *)
-  module type S1 = sig
-    type t (* = int Map.Make(Int).t *)
-    type key = int
-    type value = int
-    val empty : t
-    val add: t -> key -> value -> t
-    val find_opt : t -> key -> value option
-    val iter: t -> (key -> value -> unit) -> unit
-    val cardinal: t -> int
-    val bindings: t -> (key*value)list
-    val load: string -> t
-    val save: t -> string -> unit
-  end
-  module Small_nv_ii_map : S1 = struct
-    
-    type t = int Map.t
-
-    type key = int
-    type value = int
-
-    let empty : t = Map.empty
-                      
-    let add : t -> key -> value -> t = fun t k v -> Map.add k v t
-
-    let find_opt: t -> key -> value option = fun t k -> Map.find_opt k t 
-
-    let iter (t:t) f = Map.iter f t
-    let _ = iter
-
-    let cardinal t = Map.cardinal t
-
-    let bindings t = Map.bindings t
-
-    (** Load the map from a file; assume the file consists of (int->int) bindings *)
-    let load: string -> t = fun fn -> 
-      let sz = Unix.(stat fn |> fun st -> st.st_size) in      
-      (* check that the size is a multiple of 16 bytes, then mmap and
-         read from array *)
-      ignore(sz mod 16 = 0 || failwith "File size is not a multiple of 16");
-      let fd = Unix.(openfile fn [O_RDONLY] 0) in
-      let shared = false in
-      let mmap = Bigarray.(Unix.map_file fd Int c_layout shared [| sz |]) 
-                 |> Bigarray.array1_of_genarray
-      in
-      (* now iterate through, constructing the map *)
-      let len = Bigarray.Array1.dim mmap in
-      (0,empty) |> iter_k (fun ~k (i,m) -> 
-          match i < len with
-          | false -> m
-          | true -> 
-            let m = add m mmap.{ i } mmap.{ i+1 } in
-            k (i+2,m))
-      |> fun m ->
-      Unix.close fd;
-      m
-
-    (** Save the map to file *)
-    let save: t -> string -> unit = fun m fn ->
-      let fd = Unix.(openfile fn [O_CREAT;O_RDWR;O_TRUNC] 0o660) in
-      let shared = true in
-      let sz = Map.cardinal m in
-      let mmap = Bigarray.(Unix.map_file fd Int c_layout shared [| sz*2 |]) 
-                 |> Bigarray.array1_of_genarray
-      in
-      let i = ref 0 in
-      (* NOTE that Map.iter operates in key order, lowest first *)
-      m|> Map.iter (fun k v -> 
-          mmap.{ !i } <- k;
-          mmap.{ 1+ !i } <- v;
-          i:=!i + 2;
-          ());
-      Unix.close fd;      
-      ()                                
-  end
   
   (* NOTE if we write data at off1, and then rewrite some different
      data at off1, both lots of data will be recorded in the sparse
@@ -118,7 +41,7 @@ module Private = struct
      again we could add runtime checking to detect this *)
 
   module Sparse = struct
-    open struct module Map_ = Small_nv_ii_map end
+    open struct module Map_ = Small_int_int_map end
 
     type t = { fn:string; fd: Unix.file_descr; mutable map:Map_.t; readonly:bool }
 
@@ -223,6 +146,8 @@ module Private = struct
       type region = { start: int; end_:int; off1:int; mutable data:string }[@@deriving sexp]
 
       type region_s = region list[@@deriving sexp]
+
+      module Map_i = Map.Make(Int)
           
       (* from a sparse file, get a list of regions *)
       let to_regions t = 
@@ -231,16 +156,16 @@ module Private = struct
         List.map snd kvs |> fun vs -> 
         List.sort Int.compare vs |> fun vs -> 
         (* now form a map from region start to region end *)
-        (vs,Map.empty) |> iter_k (fun ~k (vs,map) -> 
+        (vs,Map_i.empty) |> iter_k (fun ~k (vs,map) -> 
             match vs with 
-            | [] -> (assert(kvs=[]);Map.empty)
-            | [off2] -> Map.add off2 (length t) map
-            | off2::off2'::rest -> k (off2'::rest,Map.add off2 off2' map))
+            | [] -> (assert(kvs=[]);Map_i.empty)
+            | [off2] -> Map_i.add off2 (length t) map
+            | off2::off2'::rest -> k (off2'::rest,Map_i.add off2 off2' map))
         |> fun end_map -> 
         (* now iterate over all the bindings in t.map, constructing
            the regions; leave data empty for now *)
         Map_.bindings t.map |> fun kvs -> 
-        kvs |> List.map (fun (off1,off2) -> { start=off2; end_=Map.find off2 end_map; off1; data="" })
+        kvs |> List.map (fun (off1,off2) -> { start=off2; end_=Map_i.find off2 end_map; off1; data="" })
         (* sort in r.start order *)
         |> List.sort (fun r1 r2 -> Int.compare r1.start r2.start)  |> fun regs -> 
         regs
