@@ -13,10 +13,8 @@ module Control = struct
     type t = {
       generation      : int; 
       (** incremented on every GC completion, to signal that RO instances should reload *)
-      sparse_fn       : string; (* the data in the sparse file *)
-      sparse_map_fn   : string; (* the sparse file map from virtual offset to real offset *)
-      upper_fn        : string; (* the suffix file for the upper layer *)
-      upper_offset_fn : string; (* the offset from which the upper layer starts, stored in a file *)
+      sparse_dir      : string; (* subdir which contains sparse file data and sparse file map *)
+      upper_dir       : string; (* subdir which contains the suffix file, and offset file *)
     }[@@deriving sexp]
   end
   include T
@@ -29,26 +27,14 @@ end
 Typically "gen" is some number 1234 say. Then we expect these files to exist:
 
 control
-sparse.1234
-sparse_map.1234
-upper.1234
-upper_offset.1234
-
+sparse.1234/{sparse.data,sparse.map}
+upper.1234/{upper.data,upper.offset}
 *)
 
 (** Common filenames *)
 module Fn = struct
-  let control      = "control" (** Control file *)
   let ( / ) = Filename.concat
-end
-
-(** Common strings; used only when creating new files; otherwise use
-   the filenames in control *)
-module Str = struct
-  let sparse       = "sparse" (** Sparse data file *)
-  let sparse_map   = "sparse_map" (** Sparse map file *)
-  let upper        = "upper" (** Upper data file *)
-  let upper_offset = "upper_offset" (* Upper offset *)
+  let control          = "control" (** Control file *)
 end
 
 
@@ -65,23 +51,29 @@ module IO = struct
 
 
   (* NOTE fields are mutable because we swap them out at some point *)
-  type t = { dir:string; mutable ctrl:control; mutable sparse:sparse; mutable upper:upper }
+  type t = { root:string; mutable ctrl:control; mutable sparse:sparse; mutable upper:upper }
 
+  let open_sparse_dir root sparse_dir =   
+    Sparse.open_ro 
+      ~map_fn:Fn.(root / sparse_dir / "sparse.map") 
+      Fn.(root / sparse_dir / "sparse.data")
+      
+  let open_upper_dir root upper_dir =
+    let suffix_offset = Upper.load_offset Fn.(root / upper_dir / "upper.offset") in
+    Upper.open_suffix_file ~suffix_offset Fn.(root / upper_dir / "upper.data")
+    
 
-  (* here, fn is a directory which contains the sparse, upper, freeze control etc *)
-  let open_ dir = 
-    assert(Sys.file_exists dir);
-    assert(Unix.stat dir |> fun st -> st.st_kind = Unix.S_DIR);
-    assert(Unix.stat Fn.(dir / control) |> fun st -> st.st_kind = Unix.S_REG);
-    let ctrl = Control.load Fn.(dir / control) in
+  (* root is a directory which contains the sparse, upper, freeze control etc *)
+  let open_ root = 
+    assert(Sys.file_exists root);
+    assert(Unix.stat root |> fun st -> st.st_kind = Unix.S_DIR);
+    assert(Unix.stat Fn.(root / control) |> fun st -> st.st_kind = Unix.S_REG);
+    let ctrl = Control.load Fn.(root / control) in
+    let dot_gen = ctrl.generation |> string_of_int in
     log "Loaded control file";
-    let open Control in
-    let sparse = Sparse.open_ro ~map_fn:Fn.(dir / ctrl.sparse_map_fn) Fn.(dir / ctrl.sparse_fn) in
-    let upper = 
-      let suffix_offset = Upper.load_offset Fn.(dir / ctrl.upper_offset_fn) in
-      Upper.open_suffix_file ~suffix_offset Fn.(dir / ctrl.upper_fn) 
-    in
-    { dir; ctrl; sparse; upper }
+    let sparse = open_sparse_dir root ("sparse"^dot_gen) in
+    let upper = open_upper_dir root ("upper"^dot_gen) in
+    { root; ctrl; sparse; upper }
 
   (** Various functions we need to support *)
 
@@ -251,11 +243,10 @@ module Simulation = struct
        indication that all these files exist *)
     let suc_gen = t.io.ctrl.generation +1 in
     let suc_gen_s = string_of_int suc_gen in
-    assert(Sys.file_exists Fn.(t.io.dir / control^"."^suc_gen_s));
+    assert(Sys.file_exists Fn.(t.io.root / control^"."^suc_gen_s));
     (* new data is always being written to current upper; we need to
        ensure it is also copied to next upper *)
-    let next_upper_offset = Upper.load_offset Fn.(t.io.dir / t.io.ctrl.upper_offset_fn^"."^suc_gen_s) in
-    let next_upper = Upper.open_suffix_file ~suffix_offset:next_upper_offset Fn.(t.io.dir / t.io.ctrl.upper_fn^"."^suc_gen_s) in
+    let next_upper = IO.open_upper_dir t.io.root ("upper."^suc_gen_s) in
     let _ = 
       let len1 = t.io.upper.size() in
       let len2 = next_upper.size() in

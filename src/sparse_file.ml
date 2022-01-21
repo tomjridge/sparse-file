@@ -211,6 +211,8 @@ module Private = struct
     
   end
 
+  module Check_sparse_sig = (Sparse : SPARSE)
+
 
   (** Debug module, providing conversion of sparse file into string repr *)
   module Debug = struct
