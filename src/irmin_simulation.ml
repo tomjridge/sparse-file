@@ -198,6 +198,9 @@ open Irmin_obj
 
 type irmin_obj = Irmin_obj.t
 
+
+
+
 (** We simulate Irmin: the main process creates a new object every
    second, with references to previous objects, where some references
    can be to the same object. Objects are written to disk. Some
@@ -243,6 +246,8 @@ module Simulation = struct
     go obj;
     set
 
+  (* FIXME move Disk_reachable, Worker and other modules out of
+     Simulation, so they stand apart *)
   module Disk_reachable = struct
     include Int_map
 
@@ -251,11 +256,9 @@ module Simulation = struct
        for the ancestors *)
     type entry = { len:int; ancestors:int list }
     type t = entry Int_map.t ref 
-    (** The result of [disk_calc_reachable] is a hashtbl from offset
-       to entry *)
+    (** The result of [disk_calc_reachable] is a map from offset to
+       entry *)
 
-    (* FIXME may want to make reach info a map rather than a hashtbl,
-       sorted by offset *)
   end
   module Dr = Disk_reachable
 
