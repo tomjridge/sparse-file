@@ -39,25 +39,31 @@ upper_offset.1234
 (** Common filenames *)
 module Fn = struct
   let control      = "control" (** Control file *)
+  let ( / ) = Filename.concat
+end
+
+(** Common strings; used only when creating new files; otherwise use
+   the filenames in control *)
+module Str = struct
   let sparse       = "sparse" (** Sparse data file *)
   let sparse_map   = "sparse_map" (** Sparse map file *)
   let upper        = "upper" (** Upper data file *)
   let upper_offset = "upper_offset" (* Upper offset *)
-
-  let ( / ) = Filename.concat
 end
+
 
 module IO = struct
 
-  type upper = File.suffix_file
+  type upper = File.Suffix_file.t
   type sparse = Sparse_file.t
+  type control = Control.t
 
   module Sparse = Sparse_file
 
   module Upper = File
 
   (* NOTE fields are mutable because we swap them out at some point *)
-  type t = { dir:string; mutable control:Control.t; mutable sparse:sparse; mutable upper:upper; }
+  type t = { dir:string; mutable ctrl:control; mutable sparse:sparse; mutable upper:upper }
 
 
   (* here, fn is a directory which contains the sparse, upper, freeze control etc *)
@@ -65,14 +71,15 @@ module IO = struct
     assert(Sys.file_exists dir);
     assert(Unix.stat dir |> fun st -> st.st_kind = Unix.S_DIR);
     assert(Unix.stat Fn.(dir / control) |> fun st -> st.st_kind = Unix.S_REG);
-    let control = Control.load Fn.(dir / control) in
+    let ctrl = Control.load Fn.(dir / control) in
     log "Loaded control file";
-    let sparse = Sparse.open_ro ~map_fn:Fn.(dir / sparse_map) Fn.(dir / sparse) in
+    let open Control in
+    let sparse = Sparse.open_ro ~map_fn:Fn.(dir / ctrl.sparse_map_fn) Fn.(dir / ctrl.sparse_fn) in
     let upper = 
-      let suffix_offset = Upper.load_offset Fn.(dir / upper_offset) in
-      Upper.open_suffix_file ~suffix_offset Fn.(dir / upper) 
+      let suffix_offset = Upper.load_offset Fn.(dir / ctrl.upper_offset_fn) in
+      Upper.open_suffix_file ~suffix_offset Fn.(dir / ctrl.upper_fn) 
     in
-    { dir; control; sparse; upper }
+    { dir; ctrl; sparse; upper }
 
   (** Various functions we need to support *)
 
@@ -240,13 +247,13 @@ module Simulation = struct
        current control.generation +1 (say, 1235); we use the existence
        of control.1235 -- to be renamed to control -- as the
        indication that all these files exist *)
-    let suc_gen = t.io.control.generation +1 in
+    let suc_gen = t.io.ctrl.generation +1 in
     let suc_gen_s = string_of_int suc_gen in
     assert(Sys.file_exists Fn.(t.io.dir / control^"."^suc_gen_s));
     (* new data is always being written to current upper; we need to
        ensure it is also copied to next upper *)
-    let next_upper_offset = File.load_offset Fn.(t.io.dir / upper_offset^"."^suc_gen_s) in
-    let next_upper = File.open_suffix_file ~suffix_offset:next_upper_offset Fn.(t.io.dir / upper^"."^suc_gen_s) in
+    let next_upper_offset = File.load_offset Fn.(t.io.dir / t.io.ctrl.upper_offset_fn^"."^suc_gen_s) in
+    let next_upper = File.open_suffix_file ~suffix_offset:next_upper_offset Fn.(t.io.dir / t.io.ctrl.upper_fn^"."^suc_gen_s) in
     let _ = 
       let len1 = t.io.upper.size() in
       let len2 = next_upper.size() in
@@ -254,16 +261,15 @@ module Simulation = struct
       | false -> ()
       | true -> 
         (* need to append bytes from end of t.io.upper to next_upper *)
+        let pread = File.Pread.{pread=t.io.upper.pread} in
+        let pwrite = File.Pwrite.{pwrite=next_upper.pwrite} in
         let len = len1 - len2 in
-        let off1 = ref (len1 - len) in
-        len |> iter_k (fun ~k len ->
-            match len <= 0 with
-            | true -> ()
-            | false -> 
-              
-        
-                    
-
+        File.copy ~src:pread ~dst:pwrite ~src_off:(len1-len) ~len ~dst_off:len2;
+        ()
+    in
+    (* now we perform the switch *)
+    (* FIXME TODO *)
+    ()
 
   let check_worker_status t = 
     match t.worker_pid with 

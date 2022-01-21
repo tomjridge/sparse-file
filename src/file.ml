@@ -1,10 +1,4 @@
-(** An API to use files, but without explicit file descriptors (so we
-   can switch the implementation underneath at runtime, eg to
-   sparse-file+suffix-file, and then to another
-   sparse-file+suffix-file) 
-
-    NOTE not thread safe
-*)
+(** General file utilities *)
 
 open Util
 
