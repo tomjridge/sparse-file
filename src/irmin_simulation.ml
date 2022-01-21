@@ -11,12 +11,12 @@ module Control = struct
   open Sexplib.Std
   module T = struct 
     type t = {
-      generation      : string; 
+      generation      : int; 
       (** incremented on every GC completion, to signal that RO instances should reload *)
       sparse_fn       : string; (* the data in the sparse file *)
       sparse_map_fn   : string; (* the sparse file map from virtual offset to real offset *)
       upper_fn        : string; (* the suffix file for the upper layer *)
-      upper_offset_fn : string; (* the offset from which the upper layer starts *)
+      upper_offset_fn : string; (* the offset from which the upper layer starts, stored in a file *)
     }[@@deriving sexp]
   end
   include T
@@ -43,6 +43,8 @@ module Fn = struct
   let sparse_map   = "sparse_map" (** Sparse map file *)
   let upper        = "upper" (** Upper data file *)
   let upper_offset = "upper_offset" (* Upper offset *)
+
+  let ( / ) = Filename.concat
 end
 
 module IO = struct
@@ -55,23 +57,22 @@ module IO = struct
   module Upper = File
 
   (* NOTE fields are mutable because we swap them out at some point *)
-  type t = { mutable control:Control.t; mutable sparse:sparse; mutable upper:upper; }
+  type t = { dir:string; mutable control:Control.t; mutable sparse:sparse; mutable upper:upper; }
 
-  let ( / ) = Filename.concat
 
   (* here, fn is a directory which contains the sparse, upper, freeze control etc *)
   let open_ dir = 
     assert(Sys.file_exists dir);
     assert(Unix.stat dir |> fun st -> st.st_kind = Unix.S_DIR);
-    assert(Unix.stat (dir / Fn.control) |> fun st -> st.st_kind = Unix.S_REG);
-    let control = Control.load (dir / Fn.control) in
+    assert(Unix.stat Fn.(dir / control) |> fun st -> st.st_kind = Unix.S_REG);
+    let control = Control.load Fn.(dir / control) in
     log "Loaded control file";
-    let sparse = Sparse.open_ro ~map_fn:(dir / Fn.sparse_map) (dir / Fn.sparse) in
+    let sparse = Sparse.open_ro ~map_fn:Fn.(dir / sparse_map) Fn.(dir / sparse) in
     let upper = 
-      let suffix_offset = Upper.load_offset (dir / Fn.upper_offset) in
-      Upper.open_suffix_file ~suffix_offset (dir / Fn.upper) 
+      let suffix_offset = Upper.load_offset Fn.(dir / upper_offset) in
+      Upper.open_suffix_file ~suffix_offset Fn.(dir / upper) 
     in
-    { control; sparse; upper }
+    { dir; control; sparse; upper }
 
   (** Various functions we need to support *)
 
@@ -163,9 +164,11 @@ module Simulation = struct
     io: IO.t;
     mutable clock: int;
     mutable min_free_id : int;
+    mutable worker_pid : int option;
     mutable last_commit: irmin_obj option;
     mutable last_commit_objs: irmin_obj_set;
     (** Reachable objects from last commit *)
+    mutable normal_objs_created_since_last_commit: irmin_obj_set;
   }
 
   let calc_reachable obj = 
@@ -187,31 +190,108 @@ module Simulation = struct
   let save_object t obj =
     let off = IO.size t.io in
     obj.off <- Some off;
+    Irmin_obj.save t.io obj
     
 
   module Step = struct
-     let gc t =
-       match t.last_commit with 
-       | None -> ()
-       | Some obj -> 
-         (* we know reachable objects from t.last_commit_objs *)
-         ()
-        
-     let create_commit t = ()
+    let gc t =
+      match t.last_commit with 
+      | None -> ()
+      | Some obj -> 
+        (* we want to launch a separate process to traverse the
+           objects from the last commit, store in a new sparse file,
+           calculate a new upper, and then switch IO.t *)
+        ()
+    let pre_create t =
+      let id = t.min_free_id <- t.min_free_id+1; t.min_free_id -1 in       
+      let ancestors = 
+        let possible = 
+          List.of_seq (Hashtbl.to_seq_values t.last_commit_objs) @
+          List.of_seq (Hashtbl.to_seq_values t.normal_objs_created_since_last_commit)
+        in
+        (* filter some of these out *)
+        List.filter (fun x -> Random.float 1.0 < 0.9) possible
+      in
+      let obj = Irmin_obj.{ id; typ=`Normal; ancestors; off=None } in
+      obj
 
-     let create_object t = ()
-   end
+    let create_commit t = 
+      let obj = pre_create t in
+      let obj = { obj with typ=`Commit } in
+      (* save it here, right after it is created *)
+      save_object t obj;
+      t.last_commit <- Some obj;
+      t.last_commit_objs <- calc_reachable obj;
+      Hashtbl.clear t.normal_objs_created_since_last_commit;
+      ()
+
+    let create_object t = 
+      let obj = pre_create t in
+      let obj = { obj with typ=`Normal } in
+      (* save it here, right after it is created *)
+      save_object t obj;
+      Hashtbl.add t.normal_objs_created_since_last_commit obj.id obj;
+      ()
+  end
   open Step
+
+  let handle_worker_termination t = 
+    (* after termination, we expect the new files to be created as per
+       current control.generation +1 (say, 1235); we use the existence
+       of control.1235 -- to be renamed to control -- as the
+       indication that all these files exist *)
+    let suc_gen = t.io.control.generation +1 in
+    let suc_gen_s = string_of_int suc_gen in
+    assert(Sys.file_exists Fn.(t.io.dir / control^"."^suc_gen_s));
+    (* new data is always being written to current upper; we need to
+       ensure it is also copied to next upper *)
+    let next_upper_offset = File.load_offset Fn.(t.io.dir / upper_offset^"."^suc_gen_s) in
+    let next_upper = File.open_suffix_file ~suffix_offset:next_upper_offset Fn.(t.io.dir / upper^"."^suc_gen_s) in
+    let _ = 
+      let len1 = t.io.upper.size() in
+      let len2 = next_upper.size() in
+      match len2 < len1 with
+      | false -> ()
+      | true -> 
+        (* need to append bytes from end of t.io.upper to next_upper *)
+        let len = len1 - len2 in
+        let off1 = ref (len1 - len) in
+        len |> iter_k (fun ~k len ->
+            match len <= 0 with
+            | true -> ()
+            | false -> 
+              
+        
+                    
+
+
+  let check_worker_status t = 
+    match t.worker_pid with 
+    | None -> ()
+    | Some pid -> 
+      let pid0,status = Unix.(waitpid [WNOHANG] pid) in
+      match pid0 with
+      | 0 -> 
+        (* worker still processing *)
+        ()
+      | _ when pid0=pid -> (
+          (* worker has terminated *)
+          match status with 
+          | WEXITED 0 -> handle_worker_termination t
+          | WEXITED n -> failwith (P.s "Worker terminated unsuccessfully with %d" n)
+          | _ -> failwith "Worker terminated abnormally")
+      | _ -> failwith (P.s "Unexpected pid0 value %d" pid0)
 
   let step t =    
     (* choose whether to create a commit, a normal object, or initiate
        GC wrt the last commit *)
     t.clock <- t.clock +1;
+    check_worker_status t;
     match t.clock with
-    | _ when t.clock mod 30 = 0 -> 
+    | _ when t.clock mod 41 = 0 -> 
       (* GC *)
       gc t
-    | _ when t.clock mod 20 = 0 -> 
+    | _ when t.clock mod 19 = 0 -> 
       (* create a commit *)
       create_commit t
     | _ -> 

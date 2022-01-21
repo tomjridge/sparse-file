@@ -8,26 +8,38 @@
 
 open Util
 
-type file = {
-  close            : unit -> unit;
-  append           : bytes -> unit;
-  fsync            : unit -> unit;
-  size             : unit -> int;
+module Pwrite = struct
+  type t = {
+    pwrite: off:int ref -> bytes -> unit;
+  }
+end
 
-  (* for pread/pwrite, the offset ref will be updated; pread and
-     pwrite will try to read/write all the bytes *)
-  pwrite           : off:int ref -> bytes -> unit;
-  pwrite_string    : off:int ref -> string -> unit;
-  pwrite_substring : off:int ref -> str:string -> str_off:int -> str_len:int -> unit;
-  pread            : off:int ref -> len:int -> buf:bytes -> int; 
-  (** pread assumes len <= length(buf) *)
+module Pread = struct
+  type t = {
+    pread : off:int ref -> len:int -> buf:bytes -> int; 
+  }
+end
 
-  (** returns the actual number of bytes read *)
-  pread_string     : off:int ref -> len:int -> string;    
-}
+include struct
+  open Pwrite
+  open Pread
+  let copy ~(src:Pread.t) ~(dst:Pwrite.t) ~src_off ~len ~dst_off = 
+    let {pread},{pwrite} = src,dst in
+    let src_off = ref src_off in
+    let dst_off = ref dst_off in
+    let buf_sz = 8192 in
+    let buf = Bytes.create buf_sz in
+    len |> iter_k (fun ~k len -> 
+        match len <=0 with
+        | true -> ()
+        | false -> 
+          let n = pread ~off:src_off ~len:(min buf_sz len) ~buf in
+          pwrite ~off:dst_off (Bytes.sub buf 0 n);
+          k (len - n))
+end
 
-module Private_file = struct
 
+module Private_util = struct
   (** Functions we can implement given a pwrite *)
   module With_pwrite(S:sig
       val pwrite : off:int ref -> bytes -> unit
@@ -52,7 +64,32 @@ module Private_file = struct
       (* len' may be less than len *)
       Bytes.sub buf 0 len' |> Bytes.unsafe_to_string
   end
+end
 
+(** {2 A regular file} *)
+
+module File = struct
+  type t = {
+    close            : unit -> unit;
+    append           : bytes -> unit;
+    fsync            : unit -> unit;
+    size             : unit -> int;
+
+    (* for pread/pwrite, the offset ref will be updated; pread and
+       pwrite will try to read/write all the bytes *)
+    pwrite           : off:int ref -> bytes -> unit;
+    pwrite_string    : off:int ref -> string -> unit;
+    pwrite_substring : off:int ref -> str:string -> str_off:int -> str_len:int -> unit;
+    pread            : off:int ref -> len:int -> buf:bytes -> int; 
+    (** pread assumes len <= length(buf) *)
+
+    (** returns the actual number of bytes read *)
+    pread_string     : off:int ref -> len:int -> string;    
+  }
+end
+
+module Private_file = struct
+  open Private_util
 
   module With_fd (S : sig
       val fd : Unix.file_descr
@@ -74,12 +111,11 @@ module Private_file = struct
 
     let pwrite ~off bs =
       seek !off;
-      (* if an error occurs, and exception will be thrown *)
+      (* if an error occurs, an exception will be thrown *)
       let len = Bytes.length bs in
       ignore (Unix.write fd bs 0 len);
       off := !off + len;
       ()
-
 
     let pread ~off ~len ~buf =
       let len = min len (size () - !off) in
@@ -97,7 +133,7 @@ module Private_file = struct
 
     let append buf = pwrite ~off:(ref (size ())) buf
 
-    let ops = {
+    let the_file = File.{
       close;
       append;
       fsync;
@@ -115,13 +151,13 @@ module Private_file = struct
     let open With_fd (struct
         let fd = fd
       end) in
-    ops
+    the_file
 
   let fd_to_file fd = 
     let open With_fd (struct
         let fd = fd
       end) in
-    ops
+    the_file
 
   let create_file fn = open' [ O_CREAT; O_EXCL; O_RDWR ] fn
 
@@ -137,25 +173,55 @@ let fd_to_file,create_file,open_file = Private_file.(fd_to_file,create_file,open
    offset; attempting to read/write before this offset is forbidden
    and will result in an exception. *)
 
-type suffix_file = {
-  suffix_offset    : int;
-  close            : unit -> unit;
-  append           : bytes -> unit;
-  fsync            : unit -> unit;
-  size             : unit -> int;
+module Suffix_file = struct
+  type t = {
+    suffix_offset    : int;
+    close            : unit -> unit;
+    append           : bytes -> unit;
+    fsync            : unit -> unit;
+    size             : unit -> int;
 
-  (* for pread/pwrite, the offset ref will be updated; pread and
-     pwrite will try to read/write all the bytes *)
-  pwrite           : off:int ref -> bytes -> unit;
-  pwrite_string    : off:int ref -> string -> unit;
-  pwrite_substring : off:int ref -> str:string -> str_off:int -> str_len:int -> unit;
-  pread            : off:int ref -> len:int -> buf:bytes -> int; 
-  (** returns the actual number of bytes read *)
-  pread_string     : off:int ref -> len:int -> string;    
-}
+    (* for pread/pwrite, the offset ref will be updated; pread and
+       pwrite will try to read/write all the bytes *)
+    pwrite           : off:int ref -> bytes -> unit;
+    pwrite_string    : off:int ref -> string -> unit;
+    pwrite_substring : off:int ref -> str:string -> str_off:int -> str_len:int -> unit;
+    pread            : off:int ref -> len:int -> buf:bytes -> int; 
+    (** returns the actual number of bytes read *)
+    pread_string     : off:int ref -> len:int -> string;    
+  }
+end
+
 
 module Private_suffix_file = struct
-  open Private_file
+  open Private_util
+  (* open Private_file *)
+  open Suffix_file
+
+  let suffix_file_to_file : Suffix_file.t -> File.t = function
+      {
+        suffix_offset=_;
+        close;
+        append;
+        fsync;
+        size;
+        pwrite;
+        pwrite_string;
+        pwrite_substring;
+        pread;
+        pread_string;
+      } -> 
+      {
+        close;
+        append;
+        fsync;
+        size;
+        pwrite;
+        pwrite_string;
+        pwrite_substring;
+        pread;
+        pread_string;
+      }
 
   module With_fd_offset (S : sig
       val fd : Unix.file_descr
@@ -237,7 +303,9 @@ module Private_suffix_file = struct
   let load_offset fn = Offset_util.(load fn).off
 end
 
-let create_suffix_file,open_suffix_file = Private_suffix_file.(create_suffix_file,open_suffix_file)
+let suffix_file_to_file,create_suffix_file,open_suffix_file = Private_suffix_file.(suffix_file_to_file,create_suffix_file,open_suffix_file)
 
 let save_offset,load_offset = Private_suffix_file.(save_offset,load_offset)
 
+
+  
