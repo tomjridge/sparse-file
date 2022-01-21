@@ -348,7 +348,7 @@ module Simulation = struct
       let dreach = disk_calc_reachable ~io ~off:commit_offset in
       log (P.s "Worker: calculated disk reachable objects for offset %d" commit_offset);
       (* now create the sparse file for <commit_offset, given the reachable objects *)
-      create_sparse_file ~io ~commit_off:commit_offset ~dreach;
+      create_sparse_file ~io ~commit_off:commit_offset ~dreach:!dreach;
       (* and create the new upper file >= commit_offset *)
       create_upper_file ~io ~off:commit_offset;
       (* and create new control file *)
@@ -409,7 +409,7 @@ module Simulation = struct
 
   let remove_old_files ~new_ctrl = ()
 
-  let handle_worker_termination (t:Simulation.t) = 
+  let handle_worker_termination (t:t) = 
     (* after termination, we expect the new files to be created as per
        current control.generation +1 (say, 1235); we use the existence
        of control.1235 -- to be renamed to control -- as the
@@ -419,12 +419,12 @@ module Simulation = struct
     let new_ctrl_fn = Fn.(t.io.root / control^"."^suc_gen_s) in
     assert(Sys.file_exists new_ctrl_fn);
     let new_ctrl = Control.load new_ctrl_fn in
-    let next_upper = IO.open_upper_dir Fn.(t.io.root / new_ctrl.upper_dir) in
+    let next_upper = IO.open_upper_dir t.io.root new_ctrl.upper_dir in
     let _ = 
       (* new data is always being written to current upper; we need to
        ensure it is also copied to next upper *)
       let len1 = t.io.upper.size() in
-      let len2 = next_upper.size() in
+      let len2 = next_upper.Upper.size() in
       match len2 < len1 with
       | false -> ()
       | true -> 
@@ -443,8 +443,8 @@ module Simulation = struct
     Unix.rename Fn.(t.io.root / new_ctrl_fn) Fn.(t.io.root / control);
     t.io.ctrl <- new_ctrl;
     let old_sparse, old_upper = t.io.sparse,t.io.upper in
-    t.io.sparse <- new_sparse;
-    t.io.upper <- new_upper;
+    t.io.sparse <- next_sparse;
+    t.io.upper <- next_upper;
     Sparse.close old_sparse;
     old_upper.close ();
     remove_old_files ~new_ctrl;
