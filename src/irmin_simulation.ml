@@ -52,15 +52,17 @@ module Str = struct
 end
 
 
+module Sparse = Sparse_file
+module Upper = Suffix_file
+
 module IO = struct
 
-  type upper = File.Suffix_file.t
+
+  type upper = Suffix_file.t
   type sparse = Sparse_file.t
   type control = Control.t
 
-  module Sparse = Sparse_file
 
-  module Upper = File
 
   (* NOTE fields are mutable because we swap them out at some point *)
   type t = { dir:string; mutable ctrl:control; mutable sparse:sparse; mutable upper:upper }
@@ -154,15 +156,15 @@ open Irmin_obj
 type irmin_obj = Irmin_obj.t
 
 (** We simulate Irmin: the main process creates a new object every
-   second, with references to log(n) previous objects, where some
-   references can be to the same object. Objects are written to
-   disk. Some objects are "commits"; they tend to reference many
-   objects; future objects can only reference objects reachable from
-   the most recent commit. At some point a recent commit is selected
-   and GC is performed on objects earlier than the commit: only
-   objects reachable from the commit are maintained. The GC is
-   triggered periodically, happens in another process, and should not
-   interrupt the main process.  *)
+   second, with references to previous objects, where some references
+   can be to the same object. Objects are written to disk. Some
+   objects are "commits"; future objects can only reference objects
+   reachable from the most recent commit (or that have been created
+   since then). At some point a recent commit is selected and GC is
+   performed on objects earlier than the commit: only objects
+   reachable from the commit are maintained. The GC is triggered
+   periodically, happens in another process, and should not interrupt
+   the main process.  *)
 module Simulation = struct
 
   type irmin_obj_set = (int,irmin_obj) Hashtbl.t
@@ -252,8 +254,8 @@ module Simulation = struct
     assert(Sys.file_exists Fn.(t.io.dir / control^"."^suc_gen_s));
     (* new data is always being written to current upper; we need to
        ensure it is also copied to next upper *)
-    let next_upper_offset = File.load_offset Fn.(t.io.dir / t.io.ctrl.upper_offset_fn^"."^suc_gen_s) in
-    let next_upper = File.open_suffix_file ~suffix_offset:next_upper_offset Fn.(t.io.dir / t.io.ctrl.upper_fn^"."^suc_gen_s) in
+    let next_upper_offset = Upper.load_offset Fn.(t.io.dir / t.io.ctrl.upper_offset_fn^"."^suc_gen_s) in
+    let next_upper = Upper.open_suffix_file ~suffix_offset:next_upper_offset Fn.(t.io.dir / t.io.ctrl.upper_fn^"."^suc_gen_s) in
     let _ = 
       let len1 = t.io.upper.size() in
       let len2 = next_upper.size() in
