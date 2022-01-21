@@ -8,6 +8,7 @@ open File
    and will result in an exception. *)
 
 type t = {
+  fd               : Unix.file_descr;
   suffix_offset    : int;
   close            : unit -> unit;
   append           : bytes -> unit;
@@ -30,6 +31,7 @@ module Private_suffix_file = struct
 
   let suffix_file_to_file : t -> File.t = function
       {
+        fd=_;
         suffix_offset=_;
         close;
         append;
@@ -104,6 +106,7 @@ module Private_suffix_file = struct
         let suffix_offset = suffix_offset
       end) in
     {
+      fd;
       suffix_offset;
       close;
       append;
@@ -117,10 +120,10 @@ module Private_suffix_file = struct
     }
 
   let create_suffix_file ~suffix_offset fn = 
-    open' [ O_CREAT; O_EXCL; O_RDWR ] ~suffix_offset fn
+    open' [ O_CREAT; O_EXCL; O_RDWR; O_CLOEXEC ] ~suffix_offset fn
 
   let open_suffix_file ~suffix_offset fn = 
-    open' [ O_RDWR ] ~suffix_offset fn
+    open' [ O_RDWR; O_CLOEXEC ] ~suffix_offset fn
 
   (** We usually want to store the offset in another file *)
   module Offset_util = struct

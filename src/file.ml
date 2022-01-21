@@ -93,7 +93,7 @@ module Private_file = struct
 
     let close () = Unix.close fd
 
-    (* FIXME to complete *)
+    (* FIXME perhaps add "last synced offset" metadata? *)
     let fsync () = Unix.fsync fd
 
     let size () = (Unix.fstat fd).st_size
@@ -153,9 +153,9 @@ module Private_file = struct
       end) in
     the_file
 
-  let create_file fn = open' [ O_CREAT; O_EXCL; O_RDWR ] fn
+  let create_file fn = open' [ O_CREAT; O_EXCL; O_RDWR; O_CLOEXEC ] fn
 
-  let open_file fn = open' [ O_RDWR ] fn
+  let open_file fn = open' [ O_RDWR; O_CLOEXEC ] fn
 end
 
 let fd_to_file,create_file,open_file = Private_file.(fd_to_file,create_file,open_file)
