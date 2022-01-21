@@ -283,9 +283,12 @@ module Simulation = struct
   *)
 
   module Worker = struct    
-    let suc_gen_s io = io.IO.ctrl.generation +1 |> Int.to_string in
+    let suc_gen_s io = io.IO.ctrl.generation +1 |> Int.to_string
 
-    let create_sparse_file ~io ~init_off ~dreach =
+    (* FIXME we need to filer dreach by ancestors of commit_off;
+       commit_off isn't used currently; FIXME need a good name for the
+       off from which we create the sparse file; split_off? pivot_off? *)
+    let create_sparse_file ~io ~commit_off ~dreach =
       let suc_gen = suc_gen_s io in
       Unix.mkdir Fn.(io.root / "sparse."^suc_gen) 0o770; (* FIXME perm? *)
       let sparse = Sparse.create Fn.(io.root / "sparse."^suc_gen / sparse_dot_data) in
@@ -309,7 +312,7 @@ module Simulation = struct
       Sparse.close sparse;
       log (P.s "Created new sparse file in dir %s" "sparse."^suc_gen);
       ()
-      
+
     let create_upper_file ~io ~off = 
       let suc_gen = suc_gen_s io in
       let upper_dot_suc_gen = "upper."^suc_gen in
@@ -323,12 +326,14 @@ module Simulation = struct
               ~dst:Pwrite.{pwrite=(fd_to_file upper.fd).pwrite} 
               ~dst_off:0);
       upper.close()
-
+        
+    (* FIXME maybe create_control_file_dot_n, and take an int? *)
     let create_control_file ~io = 
       let suc_gen = suc_gen_s io in
-      let ctrl = { generation=io.ctrl.generation+1;
-                   sparse_dir="sparse."^suc_gen;
-                   upper_dir="upper."^suc_gen }
+      let ctrl = Control.{ 
+          generation=io.ctrl.generation+1;
+          sparse_dir="sparse."^suc_gen;
+          upper_dir="upper."^suc_gen }
       in
       Control.save ctrl Fn.(io.root / "control."^suc_gen);
       ()
@@ -343,7 +348,7 @@ module Simulation = struct
       let dreach = disk_calc_reachable ~io ~off:commit_offset in
       log (P.s "Worker: calculated disk reachable objects for offset %d" commit_offset);
       (* now create the sparse file for <commit_offset, given the reachable objects *)
-      create_sparse_file ~io ~off:commit_offset ~dreach;
+      create_sparse_file ~io ~commit_off:commit_offset ~dreach;
       (* and create the new upper file >= commit_offset *)
       create_upper_file ~io ~off:commit_offset;
       (* and create new control file *)
@@ -402,18 +407,22 @@ module Simulation = struct
   end
   open Step
 
-  let handle_worker_termination t = 
+  let remove_old_files ~new_ctrl = ()
+
+  let handle_worker_termination (t:Simulation.t) = 
     (* after termination, we expect the new files to be created as per
        current control.generation +1 (say, 1235); we use the existence
        of control.1235 -- to be renamed to control -- as the
        indication that all these files exist *)
     let suc_gen = t.io.ctrl.generation +1 in
     let suc_gen_s = string_of_int suc_gen in
-    assert(Sys.file_exists Fn.(t.io.root / control^"."^suc_gen_s));
-    (* new data is always being written to current upper; we need to
-       ensure it is also copied to next upper *)
-    let next_upper = IO.open_upper_dir t.io.root ("upper."^suc_gen_s) in
+    let new_ctrl_fn = Fn.(t.io.root / control^"."^suc_gen_s) in
+    assert(Sys.file_exists new_ctrl_fn);
+    let new_ctrl = Control.load new_ctrl_fn in
+    let next_upper = IO.open_upper_dir Fn.(t.io.root / new_ctrl.upper_dir) in
     let _ = 
+      (* new data is always being written to current upper; we need to
+       ensure it is also copied to next upper *)
       let len1 = t.io.upper.size() in
       let len2 = next_upper.size() in
       match len2 < len1 with
@@ -426,8 +435,19 @@ module Simulation = struct
         File.copy ~src:pread ~dst:pwrite ~src_off:(len1-len) ~len ~dst_off:len2;
         ()
     in
-    (* now we perform the switch *)
-    (* FIXME TODO *)
+    (* FIXME open_sparse_dir should just take a single string? or label as ~dir ~name ?*)
+    let next_sparse = IO.open_sparse_dir t.io.root new_ctrl.sparse_dir in
+    (* now we perform the switch: rename control.suc_gen over control;
+       mutate t.io.sparse; t.io.upper *)
+    (* FIXME worker should ensure everything synced before termination *)
+    Unix.rename Fn.(t.io.root / new_ctrl_fn) Fn.(t.io.root / control);
+    t.io.ctrl <- new_ctrl;
+    let old_sparse, old_upper = t.io.sparse,t.io.upper in
+    t.io.sparse <- new_sparse;
+    t.io.upper <- new_upper;
+    Sparse.close old_sparse;
+    old_upper.close ();
+    remove_old_files ~new_ctrl;
     ()
 
   let check_worker_status t = 
