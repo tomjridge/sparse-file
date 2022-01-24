@@ -46,18 +46,20 @@ module Private = struct
               failwith (P.s 
                           "%s: attempted to load int->int*int map \
                            whose size was not a multiple of 3*8" __FILE__));
-      let fd,arr = Small_int_file.load fn in
-      (0,empty) |> iter_k (fun ~k (i,m) -> 
-          match i < Bigarray.Array1.dim arr with
-          | true -> 
-            let m = add arr.{i} (arr.{i+1},arr.{i+2}) m in
-            k (i+3,m)
-          | false -> Unix.close fd; m)
+      let ints = Small_int_file_v1.load fn in
+      assert(List.length ints mod 3 = 0);
+      (ints,empty) |> iter_k (fun ~k (ints,m) -> 
+          match ints with 
+          | [] -> m
+          | x::y::z::rest ->
+            let m = add x (y,z) m in
+            k (rest,m)
+          | _ -> failwith "impossible")
 
     let save t fn = 
       let x = ref [] in
       t |> bindings |> List.iter (fun (voff,(off,len)) -> x:= voff::off::len::!x);
-      Small_int_file.save !x fn
+      Small_int_file_v1.save !x fn
 
     (** For saving and loading in human readable form *)
     module Human_readable = struct
@@ -190,11 +192,11 @@ module Private = struct
       assert(Sys.file_exists fn);
       assert(Sys.file_exists map_fn);
       let fd = Unix.(openfile fn [O_RDONLY] 0) in
-      let map = Map_.load_hum map_fn in
+      let map = Map_.load map_fn in
       { fd; map; readonly=true }
 
-    let save_map t ~map_fn = Map_.save_hum t.map map_fn
-
+    let save_map t ~map_fn = Map_.save t.map map_fn
+        
     let close t = Unix.close t.fd
 
     let map_add t ~virt_off ~real_off ~len = t.map <- Map_.add virt_off (real_off,len) t.map

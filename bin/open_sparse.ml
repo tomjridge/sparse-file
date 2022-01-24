@@ -12,7 +12,7 @@ let _ =
   match args with 
   | [ dir; map_fn; _data_fn ] -> 
     (* let _sp = Sparse_file.open_ro ~map_fn:Fn.(dir/map_fn) Fn.(dir/data_fn) in *)
-    let _ = Util.Small_int_file.load Fn.(dir/map_fn) in
+    let _ = Util.Small_int_file_v1.load Fn.(dir/map_fn) in
     ()
   | _ -> failwith "Unrecognized command line args"
 
