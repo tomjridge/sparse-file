@@ -83,8 +83,9 @@ module Private_suffix_file = struct
       ()
 
     let pread ~off ~len ~buf =
+      log (P.s "suffix_file: pread off=%d len=%d size=%d suffix_offset=%d" !off len (size()) suffix_offset);
       let len = min len (size () - !off) in
-      seek !off;
+      seek !off; (* NOTE already takes suffix_offset into account *)
       (len, 0)
       |> iter_k (fun ~k (len, pos) ->
           match len <= 0 with

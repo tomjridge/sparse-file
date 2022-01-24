@@ -18,18 +18,23 @@ include struct
   open Pwrite
   open Pread
   let copy ~(src:Pread.t) ~(dst:Pwrite.t) ~src_off ~len ~dst_off = 
-    let {pread},{pwrite} = src,dst in
-    let src_off = ref src_off in
-    let dst_off = ref dst_off in
-    let buf_sz = 8192 in
-    let buf = Bytes.create buf_sz in
-    len |> iter_k (fun ~k len -> 
-        match len <=0 with
-        | true -> ()
-        | false -> 
-          let n = pread ~off:src_off ~len:(min buf_sz len) ~buf in
-          pwrite ~off:dst_off (Bytes.sub buf 0 n);
-          k (len - n))
+    match len = 0 with
+    | true -> ()
+    | false -> 
+      let {pread},{pwrite} = src,dst in
+      let src_off = ref src_off in
+      let dst_off = ref dst_off in
+      let buf_sz = 8192 in
+      let buf = Bytes.create buf_sz in
+      len |> iter_k (fun ~k len -> 
+          match len <=0 with
+          | true -> ()
+          | false -> 
+            let n = pread ~off:src_off ~len:(min buf_sz len) ~buf in
+            (if n=0 then log (P.s "pread returned n=0 bytes, off=%d len=%d" !src_off (min buf_sz len)));
+            assert(n>0);
+            pwrite ~off:dst_off (Bytes.sub buf 0 n);
+            k (len - n))
 end
 
 

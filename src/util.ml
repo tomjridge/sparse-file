@@ -13,6 +13,15 @@ let iter_k f (x:'a) =
   let rec k x = f ~k x in
   k x  
 
+let log s = print_endline s
+
+(** Printf abbreviations *)
+module P = struct
+  include Printf
+  let s = sprintf 
+  let p = printf
+end
+
 
 (** A small (easily held in memory) file containing just ints; loaded
    via mmap; created via mmap (so, you need to know the number of ints
@@ -24,10 +33,14 @@ module Small_int_file = struct
        read from array *)
     ignore(sz mod 8 = 0 || failwith "File size is not a multiple of 16");
     let fd = Unix.(openfile fn [O_RDONLY] 0) in
-    let shared = false in
+    let shared = false in (* if another mmap is open on the same
+                             region, with shared=true, then we can't
+                             open with shared=false? *)
+    log (P.s "Small_int_file: calling Unix.map_file fn=%s" fn);
     let mmap = Bigarray.(Unix.map_file fd Int c_layout shared [| sz |]) 
                |> Bigarray.array1_of_genarray
     in
+    log "Small_int_file: finished calling Unix.map_file";
     (* now iterate through, constructing the map *)
     Unix.close fd;
     mmap
@@ -36,6 +49,7 @@ module Small_int_file = struct
     let fd = Unix.(openfile fn [O_CREAT;O_RDWR;O_TRUNC] 0o660) in
     let shared = true in
     let sz = List.length ints in
+    log (P.s "Small_int_file.save: calling Unix.map_file fn=%s" fn);
     let mmap = Bigarray.(Unix.map_file fd Int c_layout shared [| sz |]) 
                |> Bigarray.array1_of_genarray
     in
@@ -45,7 +59,8 @@ module Small_int_file = struct
         mmap.{ !i } <- k;
         i:=!i + 1;
         ());
-    Unix.close fd;      
+    Unix.close fd;
+    Gc.full_major (); (* reclaim mmap; finalizes mmap *)
     ()                                
 end
 
@@ -92,8 +107,6 @@ module Small_int_int_map = struct
 end
 
 
-let log s = print_endline s
-
 
 module Add_load_save_funs(S:sig type t[@@deriving sexp] end) = struct
   open S
@@ -103,8 +116,11 @@ module Add_load_save_funs(S:sig type t[@@deriving sexp] end) = struct
   let load fn = Sexplib.Sexp.load_sexp fn |> t_of_sexp
 
   let to_string t = Sexplib.Sexp.to_string_hum (t |> sexp_of_t)
+  
+  (* this loads from the file name s! *)
+  let _of_string s = Sexplib.Sexp.load_sexp s |> t_of_sexp
 
-  let of_string s = Sexplib.Sexp.load_sexp s |> t_of_sexp
+  let of_string s = Sexplib.Sexp.of_string s |> t_of_sexp
       
   let to_bytes t = t |> to_string |> Bytes.unsafe_of_string
 
@@ -112,8 +128,3 @@ module Add_load_save_funs(S:sig type t[@@deriving sexp] end) = struct
 
 end
 
-(** Printf abbreviations *)
-module P = struct
-  include Printf
-  let s = sprintf 
-end
