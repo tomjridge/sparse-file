@@ -1,3 +1,5 @@
+(* DEPRECATED
+
 (** An implementation of a "small" (fits in memory) list of ints. NOTE
    this is much slower than Small_int_file_v1; could be made much
    faster by batching writes *)
@@ -50,3 +52,4 @@ module Test() = struct
     assert(ints = ints');
     ()
 end
+*)

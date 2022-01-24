@@ -12,10 +12,12 @@ let _ =
     let open Util.Small_int_file_v1.Test() in
     ()
 
+(*
 let _ = 
   if List.mem "small_int_file_v2" args then
     let open Small_int_file_v2.Test() in
     ()
+*)
 
 let _ = 
   (* only perform if "perf" is in cl args *)
