@@ -22,28 +22,42 @@ module P = struct
   let p = printf
 end
 
+let dontlog_envvar = 
+  let s = try Unix.getenv "DONTLOG" with Not_found -> "" in
+  let xs = String.split_on_char ',' s in
+  log (P.s "%s: DONTLOG envvar: %s" __FILE__ (String.concat " " xs));
+  xs
+
+open struct
+(** Turn off logging if the filename is in the "DONTLOG" envvar *)
+let log = 
+  if List.mem __FILE__ dontlog_envvar then fun _s -> () else log
+end
+
+
 
 (** A small (easily held in memory) file containing just ints; loaded
    via mmap; created via mmap (so, you need to know the number of ints
    upfront) *)
 module Small_int_file = struct
-  let load fn : (int, Bigarray.int_elt, Bigarray.c_layout) Bigarray.Array1.t = 
+  let load fn : Unix.file_descr * (int, Bigarray.int_elt, Bigarray.c_layout) Bigarray.Array1.t = 
     let sz = Unix.(stat fn |> fun st -> st.st_size) in      
     (* check that the size is a multiple of 8 bytes, then mmap and
        read from array *)
     ignore(sz mod 8 = 0 || failwith "File size is not a multiple of 16");
-    let fd = Unix.(openfile fn [O_RDONLY] 0) in
+    let fd = Unix.(openfile fn [O_RDWR] 0o660(*dummy*)) in
+    (* NOTE O_RDWR seems to be required even though we only open in
+       readonly mode *)
     let shared = false in (* if another mmap is open on the same
                              region, with shared=true, then we can't
                              open with shared=false? *)
-    log (P.s "Small_int_file: calling Unix.map_file fn=%s" fn);
+    log (P.s "Small_int_file.load: calling Unix.map_file fn=%s" fn);
     let mmap = Bigarray.(Unix.map_file fd Int c_layout shared [| sz |]) 
                |> Bigarray.array1_of_genarray
     in
-    log "Small_int_file: finished calling Unix.map_file";
+    log "Small_int_file.load: finished calling Unix.map_file";
     (* now iterate through, constructing the map *)
-    Unix.close fd;
-    mmap
+    fd,mmap
 
   let save (ints: int list) fn =
     let fd = Unix.(openfile fn [O_CREAT;O_RDWR;O_TRUNC] 0o660) in
@@ -53,12 +67,14 @@ module Small_int_file = struct
     let mmap = Bigarray.(Unix.map_file fd Int c_layout shared [| sz |]) 
                |> Bigarray.array1_of_genarray
     in
+    log "Small_int_file.save: finished calling Unix.map_file";
     let i = ref 0 in
     (* NOTE that Map.iter operates in key order, lowest first *)
     ints|> List.iter (fun k -> 
         mmap.{ !i } <- k;
         i:=!i + 1;
         ());
+    Unix.fsync fd;
     Unix.close fd;
     Gc.full_major (); (* reclaim mmap; finalizes mmap *)
     ()                                
@@ -84,7 +100,7 @@ module Small_int_int_map = struct
     (* check that the size is a multiple of 16 bytes, then mmap and
        read from array *)
     ignore(sz mod 16 = 0 || failwith "File size is not a multiple of 16");
-    let mmap = Small_int_file.load fn in
+    let fd,mmap = Small_int_file.load fn in
     (* now iterate through, constructing the map *)
     let len = Bigarray.Array1.dim mmap in
     (0,Map_.empty) |> iter_k (fun ~k (i,m) -> 
@@ -94,6 +110,7 @@ module Small_int_int_map = struct
           let m = Map_.add mmap.{ i } mmap.{ i+1 } m in
           k (i+2,m))
     |> fun m ->
+    Unix.close fd;
     m
 
   (** Save the map to file *)
@@ -104,6 +121,20 @@ module Small_int_int_map = struct
       !x
     in
     Small_int_file.save ints fn
+
+  module Test() = struct
+    let _ = 
+      let fn = Filename.temp_file "test" ".tmp" in
+      (* let fd = Unix.(openfile fn [O_CREAT;O_TRUNC;O_RDWR] 0o660) in *)
+      let kvs = [(0,0);(1,1);(2,2)] in
+      let m = Map_.of_seq (List.to_seq kvs) in
+      save m fn;
+      let m = load fn in
+      let bs = Map_.bindings m in
+      assert(bs = kvs);
+      ()
+  end
+
 end
 
 

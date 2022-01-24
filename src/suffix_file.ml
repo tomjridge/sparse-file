@@ -3,6 +3,10 @@
 open Util
 open File
 
+(** Turn off logging if the filename is in the "DONTLOG" envvar *)
+let log = 
+  if List.mem __FILE__ Util.dontlog_envvar then fun _s -> () else Util.log
+
 (** A suffix file models the suffix of a normal file from a given
    offset; attempting to read/write before this offset is forbidden
    and will result in an exception. *)

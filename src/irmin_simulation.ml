@@ -180,6 +180,7 @@ module Irmin_obj = struct
 
   let read_from_disk = 
     let buf8 = Bytes.create 8 in
+    let log = if List.mem "read_from_disk" Util.dontlog_envvar then fun _ -> () else Util.log in
     fun ~(pread:File.Pread.t) ~off ->
       log "read_from_disk";
       let off0 = off in
@@ -263,11 +264,12 @@ module Simulation = struct
     (** The result of [disk_calc_reachable] is a map from offset to
        entry *)
 
+    let log = if List.mem "disk_calc_reachable" Util.dontlog_envvar then fun _ -> () else Util.log 
   end
   module Dr = Disk_reachable
 
   let disk_calc_reachable ~(io:IO.t) ~(off:int) : Dr.t =
-    log "started disk_calc_reachable";
+    Dr.log "started disk_calc_reachable";
     let pread = File.Pread.{pread=IO.unsafe_pread io} in
     (* map from offset to (len,<list of offs immediately reachable from this off) *)
     let dreach : Dr.t = ref Int_map.empty in
@@ -275,9 +277,9 @@ module Simulation = struct
       Dr.mem off !dreach |> function
       | true -> () (* already traversed *)
       | false -> 
-        log "disk_calc_reachable: about to pread";
+        Dr.log "disk_calc_reachable: about to pread";
         let r = Irmin_obj.read_from_disk ~pread ~off in
-        log "disk_calc_reachable: finished pread";
+        Dr.log "disk_calc_reachable: finished pread";
         dreach := Dr.add off Dr.{len=r.len; ancestors=r.obj.ancestors} !dreach;
         List.iter go r.obj.ancestors
     in
@@ -410,7 +412,7 @@ module Simulation = struct
           List.of_seq (Hashtbl.to_seq_values t.normal_objs_created_since_last_commit)
         in
         (* filter some of these out *)
-        List.filter (fun x -> Random.float 1.0 < 0.9) possible
+        List.filter (fun x -> Random.float 1.0 < 0.5) possible
       in
       let obj = Irmin_obj.{ id; typ=`Normal; ancestors; off=None } in
       obj
@@ -445,10 +447,11 @@ module Simulation = struct
          of control.1235 -- to be renamed to control -- as the
          indication that all these files exist *)
       let suc_gen = suc_gen_s t.io in
-      let new_ctrl_fn = Fn.(t.io.root / control^"."^suc_gen) in
-      assert(Sys.file_exists new_ctrl_fn);
+      let new_ctrl_name = Fn.control^"."^suc_gen in
+      let new_ctrl_pth = Fn.(t.io.root / new_ctrl_name) in
+      assert(Sys.file_exists new_ctrl_pth);
       log "handle_worker_termination: loading new control";      
-      let new_ctrl = Control.load new_ctrl_fn in
+      let new_ctrl = Control.load new_ctrl_pth in
       log "handle_worker_termination: loading new upper";
       let next_upper = IO.open_upper_dir t.io.root new_ctrl.upper_dir in
       let _ = 
@@ -473,7 +476,8 @@ module Simulation = struct
          mutate t.io.sparse; t.io.upper *)
       (* FIXME worker should ensure everything synced before termination *)
       log "main: renaming new control over old control";
-      Unix.rename Fn.(t.io.root / new_ctrl_fn) Fn.(t.io.root / control);
+      Unix.rename Fn.(t.io.root / new_ctrl_name) Fn.(t.io.root / control);
+      t.worker_pid <- None;
       t.io.ctrl <- new_ctrl;
       let old_sparse, old_upper = t.io.sparse,t.io.upper in
       t.io.sparse <- next_sparse;
@@ -506,6 +510,7 @@ module Simulation = struct
       t.clock <- t.clock +1;
       check_worker_status t;
       match t.clock with
+      | _ when t.clock = 250 -> Unix._exit 0 (* extend this for further testing *)
       | _ when t.clock mod 41 = 0 -> 
         (* GC *)
         gc t

@@ -46,18 +46,55 @@ module Private = struct
               failwith (P.s 
                           "%s: attempted to load int->int*int map \
                            whose size was not a multiple of 3*8" __FILE__));
-      let arr = Small_int_file.load fn in
+      let fd,arr = Small_int_file.load fn in
       (0,empty) |> iter_k (fun ~k (i,m) -> 
           match i < Bigarray.Array1.dim arr with
           | true -> 
             let m = add arr.{i} (arr.{i+1},arr.{i+2}) m in
             k (i+3,m)
-          | false -> m)
+          | false -> Unix.close fd; m)
 
     let save t fn = 
       let x = ref [] in
       t |> bindings |> List.iter (fun (voff,(off,len)) -> x:= voff::off::len::!x);
       Small_int_file.save !x fn
+
+    (** For saving and loading in human readable form *)
+    module Human_readable = struct
+      module T = struct
+        open Sexplib.Std
+        type ent = { voff:int; off:int; len:int }[@@deriving sexp]
+        type t = ent list[@@deriving sexp]
+      end
+      include T
+      include Add_load_save_funs(T)
+    end
+    module Hr = Human_readable
+
+    let save_hum t fn =
+      t |> bindings |> List.map (fun (voff,(off,len)) -> Hr.{voff;off;len}) |> fun x -> 
+      Hr.save x fn
+
+    (* step through a list of (voff,off,len); sort (voff,len) by voff,
+       and print which regions are not mapped *)
+    let debug_vols t = Hr.(
+        t |> iter_k (fun ~k xs -> 
+            match xs with 
+            | [] -> ()
+            | [_x] -> ()
+            | x::y::rest -> 
+              match y.voff = x.voff+x.len with 
+              | false -> 
+                Util.log (P.s "Missing region from voff %d of length %d " 
+                       (x.voff+x.len) (y.voff - (x.voff+x.len)));
+                k (y::rest)
+              | true -> 
+                k (y::rest)))            
+
+    let load_hum fn =
+      Hr.load fn |> fun t -> 
+      debug_vols t; t |> List.map (fun Hr.{voff;off;len} -> (voff,(off,len))) |> List.to_seq |> Int_map.of_seq
+      
   end
 
 
@@ -153,10 +190,10 @@ module Private = struct
       assert(Sys.file_exists fn);
       assert(Sys.file_exists map_fn);
       let fd = Unix.(openfile fn [O_RDONLY] 0) in
-      let map = Map_.load map_fn in
+      let map = Map_.load_hum map_fn in
       { fd; map; readonly=true }
 
-    let save_map t ~map_fn = Map_.save t.map map_fn
+    let save_map t ~map_fn = Map_.save_hum t.map map_fn
 
     let close t = Unix.close t.fd
 

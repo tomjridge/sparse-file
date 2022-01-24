@@ -16,3 +16,8 @@ let _ =
   if List.mem "simulation" args then
     let open Irmin_simulation.Test() in
     ()
+
+let _ = 
+  if List.mem "int_load_save" args then 
+    let open Util.Small_int_int_map.Test() in
+    ()
