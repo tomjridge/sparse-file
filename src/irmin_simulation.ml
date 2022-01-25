@@ -1,121 +1,13 @@
-(** A pretend version of irmin/Tezos *)
+(** A toy version of irmin/Tezos, in order to implement layered store/GC *)
 
 [@@@warning "-27"](* FIXME remove *)
 
 open Util
 
-
-(** A control file, which records various bits of information about
-   the IO state; updated atomically via rename from tmp *)
-module Control = struct
-  open Sexplib.Std
-  module T = struct 
-    type t = {
-      generation      : int; 
-      (** incremented on every GC completion, to signal that RO instances should reload *)
-      sparse_dir      : string; (* subdir which contains sparse file data and sparse file map *)
-      upper_dir       : string; (* subdir which contains the suffix file, and offset file *)
-    }[@@deriving sexp]
-  end
-  include T
-  include Add_load_save_funs(T)
-end
-
-
-(** Structure of IO directory:
-
-Typically "gen" is some number 1234 say. Then we expect these files to exist:
-
-control
-sparse.1234/{sparse.data,sparse.map}
-upper.1234/{upper.data,upper.offset}
-*)
-
-(** Common filenames *)
-module Fn = struct
-  let ( / ) = Filename.concat
-  let control          = "control" (** Control file *)
-end
-
-
+(* Shorter aliases/abbrevs *)
 module Sparse = Sparse_file
 module Upper = Suffix_file
-
-let sparse_dot_map = "sparse.map"
-let sparse_dot_data = "sparse.data"
-let upper_dot_offset = "upper.offset"
-let upper_dot_data = "upper.data"
-
-module IO = struct
-
-
-  type upper = Suffix_file.t
-  type sparse = Sparse_file.t
-  type control = Control.t
-
-
-
-  (* NOTE fields are mutable because we swap them out at some point *)
-  type t = { root:string; mutable ctrl:control; mutable sparse:sparse; mutable upper:upper }
-
-  let open_sparse_dir root sparse_dir =   
-    Sparse.open_ro 
-      ~map_fn:Fn.(root / sparse_dir / sparse_dot_map) 
-      Fn.(root / sparse_dir / sparse_dot_data)
-      
-  let open_upper_dir root upper_dir =
-    let suffix_offset = Upper.load_offset Fn.(root / upper_dir / upper_dot_offset) in
-    Upper.open_suffix_file ~suffix_offset Fn.(root / upper_dir / upper_dot_data)
-    
-
-  (* root is a directory which contains the sparse, upper, freeze control etc *)
-  let open_ root = 
-    assert(Sys.file_exists root);
-    assert(Unix.stat root |> fun st -> st.st_kind = Unix.S_DIR);
-    assert(Unix.stat Fn.(root / control) |> fun st -> st.st_kind = Unix.S_REG);
-    let ctrl = Control.load Fn.(root / control) in
-    let gen_s = ctrl.generation |> string_of_int in
-    log "Loaded control file";
-    (* FIXME should use ctrl to get filenames *)
-    let sparse = open_sparse_dir root ("sparse."^gen_s) in
-    log "Loaded sparse file";
-    let upper = open_upper_dir root ("upper."^gen_s) in
-    log "Loaded upper file";
-    log "IO created";
-    { root; ctrl; sparse; upper }
-
-  (** Various functions we need to support *)
-
-  let size t = t.upper.size()
-
-  let append t bs = t.upper.append bs
-
-  let pread t : off:int ref -> len:int -> buf:bytes -> (int,unit) result = 
-    fun ~off ~len ~buf ->
-    match !off >= t.upper.suffix_offset with
-    | true -> Ok (t.upper.pread ~off ~len ~buf)
-    | false -> 
-      (* need to pread in the sparse file *)
-      Sparse.translate_vreg t.sparse ~virt_off:!off ~len |> function
-      | None -> 
-        (* can't find the requested region in the sparse file *)
-        Error ()
-      | Some roff ->
-        (* can read from sparse file at real offset roff *)
-        File.fd_to_file t.sparse.fd |> fun file -> 
-        assert(file.pread ~off:(ref roff) ~len ~buf = len);
-        off:=!off + len;
-        Ok len                   
-
-  let unsafe_pread t : off:int ref -> len:int -> buf:bytes -> int = 
-    fun ~off ~len ~buf ->
-    pread t ~off ~len ~buf |> function
-    | Ok n -> n
-    | Error () -> failwith "unsafe_pread: unable to read requested region from sparse file" 
-                  
-end
-
-
+module Control = Io_control
 
 module Irmin_obj = struct
 
@@ -167,7 +59,7 @@ module Irmin_obj = struct
       Bytes.set_int64_be bs 0 (Int64.of_int n);
       bs
     in                                                  
-    IO.append io bs;
+    Io.append io bs;
     ()
 
   module Read_from_disk = struct
@@ -204,8 +96,6 @@ open Irmin_obj
 type irmin_obj = Irmin_obj.t
 
 
-
-
 (** We simulate Irmin: the main process creates a new object every
    second, with references to previous objects, where some references
    can be to the same object. Objects are written to disk. Some
@@ -221,7 +111,7 @@ module Simulation = struct
   type irmin_obj_set = (int,irmin_obj) Hashtbl.t
   
   type t = {
-    io: IO.t;
+    io: Io.t;
     mutable clock: int;
     mutable min_free_id : int;
     mutable worker_pid : int option;
@@ -232,7 +122,7 @@ module Simulation = struct
   }
 
   let save_object t obj =
-    let off = IO.size t.io in
+    let off = Io.size t.io in
     obj.off <- Some off;
     Irmin_obj.save t.io obj
 
@@ -256,21 +146,19 @@ module Simulation = struct
   module Disk_reachable = struct
     include Int_map
 
-    (** For a given offset, we record the length of the bytes
-       representing the object at that offset, and the list of offsets
-       for the ancestors *)
+    (** For a given offset, we record the length of the bytes representing the object at
+       that offset, and the list of offsets for the ancestors *)
     type entry = { len:int; ancestors:int list }
     type t = entry Int_map.t ref 
-    (** The result of [disk_calc_reachable] is a map from offset to
-       entry *)
+    (** The result of [disk_calc_reachable] is a map from offset to entry *)
 
     let log = if List.mem "disk_calc_reachable" Util.dontlog_envvar then fun _ -> () else Util.log 
   end
   module Dr = Disk_reachable
 
-  let disk_calc_reachable ~(io:IO.t) ~(off:int) : Dr.t =
+  let disk_calc_reachable ~(io:Io.t) ~(off:int) : Dr.t =
     Dr.log "started disk_calc_reachable";
-    let pread = File.Pread.{pread=IO.unsafe_pread io} in
+    let pread = File.Pread.{pread=Io.unsafe_pread io} in
     (* map from offset to (len,<list of offs immediately reachable from this off) *)
     let dreach : Dr.t = ref Int_map.empty in
     let rec go off = 
@@ -285,22 +173,19 @@ module Simulation = struct
     in
     go off;
     dreach
-  (* FIXME another way to do this is just to look at all objects
-     created from the last gc, in order, and follow their refs to
-     other objects; this uses sequential disk access and may be
-     faster; if we refer to an object in the sparse file (ie reachable
-     from previous GC commit) then we could use a pre-calculated
-     reachability graph; for the moment, we just do the extremely dumb
-     thing;
-  *)
+  (* FIXME another way to do this is just to look at all objects created from the last gc,
+     in order, and follow their refs to other objects; this uses sequential disk access
+     and may be faster; if we refer to an object in the sparse file (ie reachable from
+     previous GC commit) then we could use a pre-calculated reachability graph; for the
+     moment, we just do the extremely dumb thing; *)
 
-  let suc_gen_s io = io.IO.ctrl.generation +1 |> Int.to_string
+  let suc_gen_s io = io.Io.ctrl.generation +1 |> Int.to_string
 
   module Worker = struct    
 
-    (* FIXME we need to filer dreach by ancestors of commit_off;
-       commit_off isn't used currently; FIXME need a good name for the
-       off from which we create the sparse file; split_off? pivot_off? *)
+    (* FIXME we need to filer dreach by ancestors of commit_off; commit_off isn't used
+       currently; FIXME need a good name for the off from which we create the sparse file;
+       split_off? pivot_off? *)
     let create_sparse_file ~io ~commit_off ~dreach =
       let suc_gen = suc_gen_s io in
       Unix.mkdir Fn.(io.root / "sparse."^suc_gen) 0o770; (* FIXME perm? *)
@@ -357,13 +242,12 @@ module Simulation = struct
 
     let run_worker ~dir ~commit_offset = 
       log (P.s "worker: running with dir=%s commit_offset=%d" dir commit_offset);
-      (* load the control, sparse, upper; traverse from commit_offset
-         and store in new sparse file; create new upper file;
-         terminate *)
-      let io = IO.open_ dir in
+      (* load the control, sparse, upper; traverse from commit_offset and store in new
+         sparse file; create new upper file; terminate *)
+      let io = Io.open_ dir in
       log "worker: IO opened";
-      (* load preobj at commit_offset, figure out (off,len) info,
-         construct new sparse file *)
+      (* load preobj at commit_offset, figure out (off,len) info, construct new sparse
+         file *)
       let dreach = disk_calc_reachable ~io ~off:commit_offset in
       log "worker: dreach calculated";
       log (P.s "worker: calculated disk reachable objects for offset %d" commit_offset);
@@ -376,7 +260,11 @@ module Simulation = struct
       (* and create new control file *)
       create_control_file ~io;
       log "worker: control file created";
-      log "worker: terminating";
+      log "worker: final sleep";
+      Unix.sleepf 0.2; 
+      (* FIXME remove this after testing - just to check new upper is extended properly by
+         main thread *)
+      log "worker: terminating";      
       ()
 
     let fork_worker ~dir ~commit_offset = 
@@ -391,14 +279,15 @@ module Simulation = struct
     let gc t =
       match t.worker_pid with 
       | Some pid -> 
+        (* FIXME this is perhaps a case where we need to signal something is wrong *)
         log (P.s "main: worker pid %d already executing; skipping gc" pid)
       | None -> 
         match t.last_commit with 
         | None -> ()
         | Some obj -> 
-          (* we want to launch a separate process to traverse the
-             objects from the last commit, store in a new sparse file,
-             calculate a new upper, and then switch IO.t *)
+          (* we want to launch a separate process to traverse the objects from the last
+             commit, store in a new sparse file, calculate a new upper, and then switch
+             Io.t *)
           (* first, make sure upper is flushed, so worker can read the commit at commit_offset *)
           t.io.upper.fsync();
           let `Pid pid = Worker.fork_worker ~dir:t.io.root ~commit_offset:(Irmin_obj.get_off obj) in
@@ -447,21 +336,25 @@ module Simulation = struct
          of control.1235 -- to be renamed to control -- as the
          indication that all these files exist *)
       let suc_gen = suc_gen_s t.io in
-      let new_ctrl_name = Fn.control^"."^suc_gen in
+      let new_ctrl_name = control_s^"."^suc_gen in
       let new_ctrl_pth = Fn.(t.io.root / new_ctrl_name) in
       assert(Sys.file_exists new_ctrl_pth);
       log "handle_worker_termination: loading new control";      
       let new_ctrl = Control.load new_ctrl_pth in
       log "handle_worker_termination: loading new upper";
-      let next_upper = IO.open_upper_dir t.io.root new_ctrl.upper_dir in
+      let next_upper = Io.open_upper_dir t.io.root new_ctrl.upper_dir in
       let _ = 
         (* new data is always being written to current upper; we need to
            ensure it is also copied to next upper *)
+        (* FIXME we should check the case when this code is actually
+           exercised; perhaps insert a "sleepf 1.0" at the end of the
+           worker thread *)
         let len1 = t.io.upper.size() in
         let len2 = next_upper.Upper.size() in
         match len2 < len1 with
         | false -> ()
         | true -> 
+          log "handle_worker_termination: extending new upper";
           (* need to append bytes from end of t.io.upper to next_upper *)
           let pread = File.Pread.{pread=t.io.upper.pread} in
           let pwrite = File.Pwrite.{pwrite=next_upper.pwrite} in
@@ -471,12 +364,13 @@ module Simulation = struct
       in
       log "handle_worker_termination: loading new sparse";
       (* FIXME open_sparse_dir should just take a single string? or label as ~dir ~name ?*)
-      let next_sparse = IO.open_sparse_dir t.io.root new_ctrl.sparse_dir in
+      let next_sparse = Io.open_sparse_dir t.io.root new_ctrl.sparse_dir in
       (* now we perform the switch: rename control.suc_gen over control;
          mutate t.io.sparse; t.io.upper *)
       (* FIXME worker should ensure everything synced before termination *)
       log "main: renaming new control over old control";
-      Unix.rename Fn.(t.io.root / new_ctrl_name) Fn.(t.io.root / control);
+      Unix.rename Fn.(t.io.root / new_ctrl_name) Fn.(t.io.root / control_s);
+      (* FIXME probably want a sync on the directory as well *)
       t.worker_pid <- None;
       t.io.ctrl <- new_ctrl;
       let old_sparse, old_upper = t.io.sparse,t.io.upper in
@@ -525,7 +419,7 @@ module Simulation = struct
       let root = "./tmp/" in
       try Unix.mkdir root 0o770 with Unix.(Unix_error (Unix.EEXIST,_,_)) -> ();
       let ctrl = Control.{ generation=0; sparse_dir="sparse.0"; upper_dir="upper.0" } in
-      Control.save ctrl Fn.(root / control);
+      Control.save ctrl Fn.(root / control_s);
       (* create empty sparse file *)
       let _sparse = 
         Unix.mkdir Fn.(root / ctrl.sparse_dir) 0o770;
@@ -542,7 +436,7 @@ module Simulation = struct
         up.close()
       in    
       (* open the IO we just created *)
-      let io = IO.open_ root in
+      let io = Io.open_ root in
       log "Opened IO";
       let t = { 
         io; 

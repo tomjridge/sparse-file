@@ -186,3 +186,14 @@ module Add_load_save_funs(S:sig type t[@@deriving sexp] end) = struct
 
 end
 
+(** This module provides the infix [/] operator for string concat *)
+module Fn = struct
+  let ( / ) = Filename.concat
+end
+
+(** Common strings for filenames *)
+let control_s = "control" (** The control file is always called "control" *)
+let sparse_dot_map = "sparse.map"
+let sparse_dot_data = "sparse.data"
+let upper_dot_offset = "upper.offset"
+let upper_dot_data = "upper.data"
