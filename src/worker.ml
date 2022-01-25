@@ -1,10 +1,11 @@
 open Util
 
-(* Shorter aliases/abbrevs *)
-module Sparse = Sparse_file
-module Upper = Suffix_file
-module Control = Io_control
-
+open struct
+  (* Shorter aliases/abbrevs *)
+  module Sparse = Sparse_file
+  module Upper = Suffix_file
+  module Control = Io_control
+end
 
 module Disk_reachable = struct
   include Int_map
@@ -43,7 +44,10 @@ module Disk_reachable = struct
 end
 module Dr = Disk_reachable
 
+(**/**)
 let suc_gen_s io = io.Io.ctrl.generation +1 |> Int.to_string
+(**/**)
+
 
 (* FIXME we need to filer dreach by ancestors of commit_off; commit_off isn't used
    currently; FIXME need a good name for the off from which we create the sparse file;
@@ -91,7 +95,8 @@ let create_upper_file ~io ~off =
   log "creating upper file: closing";
   upper.close()
 
-(* FIXME maybe create_control_file_dot_n, and take an int? or create_next_ctrl_file *)
+(* FIXME maybe create_control_file_dot_n, and take an int? or create_next_ctrl_file; or
+   just param all the worker steps with a (root,next_ctrl) *)
 let create_control_file ~io = 
   let suc_gen = suc_gen_s io in
   let ctrl = Control.{ 

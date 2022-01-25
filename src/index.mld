@@ -1,5 +1,11 @@
 {0 Sparse-file package}
 
+{1 Library sparse_file_lib}
+
+The entry point of this library is the module: {!module-Sparse_file_lib}.
+
+
+
 {1 Introduction}
 
 This package implements two file-related concepts:
@@ -67,14 +73,14 @@ The idea is to simulate a huge pack file with a number of other files:
 v}
 
 
-The upper file (or "suffix file") is just a direct copy of the
+{b The upper file} (or "suffix file") is just a direct copy of the
 contents of the pack file from [commit].
 
 {v
 [upper file] = [[commit] ...<objs after commit>...]
 v}
 
-For archive stores, the lower file contains everything before the commit:
+For archive stores, the {b lower file} contains everything before the commit:
 
 {v
 [lower file] = [[obj][obj]...<upto commit>]
@@ -84,7 +90,7 @@ For rolling nodes, there will be no lower file. Possibly there will be
 other variants (eg lower file contains part of the data before the
 commit), which we ignore for now.
 
-The sparse file contains all objects reachable from the commit:
+{b The sparse file} contains all objects reachable from the commit:
 
 {v
 [sparse file] = [[000][obj]...<reachable objs from commit>]
@@ -111,10 +117,9 @@ not stored in the sparse file).
  sparse file    upper file (suffix file)
 v}
 
-At some point, the upper file becomes large, so we choose a recent
-commit in upper, and construct a new sparse file and new upper file
-(all without blocking the main Tezos node process), and finally switch
-to the new sparse+upper.
+{b When the upper file becomes large:} At some point, the upper file becomes large, so we
+choose a recent commit in upper, and construct a new sparse file and new upper file (all
+without blocking the main Tezos node process), and finally switch to the new sparse+upper.
 
 {v
 
@@ -134,7 +139,7 @@ A key point is that the store.pack file exposes offsets for the
 offsets in the sparse file or the upper file. Offsets that refer to
 the original pack file we call "absolute" or "virtual".
 
-{2 Worker implementation}
+{1 Worker implementation}
 
 When we decide we want to create a new sparse+upper, we select a recent commit
 (historically called the "freeze commit"), get the absolute offset of the commit, and
@@ -174,16 +179,9 @@ NOTE we refer to this process of creating a new sparse+upper as "GC", "sparsific
 "freezing".
 
 
-{2 File dependencies}
+{1 File dependencies}
 
-The code can be understood in a sequence of layers:
-
-- Base: file.ml util.ml irmin_obj.ml
-- Core (depends on Base): sparse_file.ml suffix_file.ml
-- IO (depends on Core): io_control.ml io.ml 
-- Worker (depends on IO): worker.ml
-- Simulation (depends on Worker): irmin_simulation.ml
-
+See {!Sparse_file_lib} for the structure of the modules into layers.
 
 
 {1 Previous documents}
