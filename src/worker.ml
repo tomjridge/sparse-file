@@ -8,13 +8,15 @@ open struct
 end
 
 module Disk_reachable = struct
-  include Int_map
+  open Int_map
 
   (** For a given offset, we record the length of the bytes representing the object at
       that offset, and the list of offsets for the ancestors *)
   type entry = { len:int; ancestors:int list }
-  type t = entry Int_map.t ref 
+  type t = entry Int_map.t
   (** The result of [disk_calc_reachable] is a map from offset to entry *)
+
+  let iter f (x:t) = iter f x
 
   let log = if List.mem "disk_calc_reachable" Util.dontlog_envvar then fun _ -> () else Util.log 
 
@@ -22,7 +24,7 @@ module Disk_reachable = struct
     log "started disk_calc_reachable";
     let pread = File.Pread.{pread=Io.unsafe_pread io} in
     (* map from offset to (len,<list of offs immediately reachable from this off>) *)
-    let dreach : t = ref Int_map.empty in
+    let dreach : t ref = ref Int_map.empty in
     let rec go off = 
       mem off !dreach |> function
       | true -> () (* already traversed *)
@@ -34,7 +36,7 @@ module Disk_reachable = struct
         List.iter go r.obj.ancestors
     in
     go off;
-    dreach
+    !dreach
     (* FIXME another way to do this is just to look at all objects created from the last
        gc, in order, and follow their refs to other objects; this uses sequential disk
        access and may be faster; if we refer to an object in the sparse file (ie reachable
@@ -52,7 +54,7 @@ let suc_gen_s io = io.Io.ctrl.generation +1 |> Int.to_string
 (* FIXME we need to filer dreach by ancestors of commit_off; commit_off isn't used
    currently; FIXME need a good name for the off from which we create the sparse file;
    split_off? pivot_off? *)
-let create_sparse_file ~io ~dreach =
+let create_sparse_file ~io ~(dreach:Dr.t) =
   let suc_gen = suc_gen_s io in
   Unix.mkdir Fn.(io.root / "sparse."^suc_gen) 0o770; (* FIXME perm? *)
   let sparse = Sparse.create Fn.(io.root / "sparse."^suc_gen / sparse_dot_data) in
@@ -119,7 +121,7 @@ let run_worker ~dir ~commit_offset =
   log "worker: dreach calculated";
   log (P.s "worker: calculated disk reachable objects for offset %d" commit_offset);
   (* now create the sparse file for <commit_offset, given the reachable objects *)
-  create_sparse_file ~io ~dreach:!dreach;
+  create_sparse_file ~io ~dreach:dreach;
   log "worker: sparse file created";
   (* and create the new upper file >= commit_offset *)
   create_upper_file ~io ~off:commit_offset;
