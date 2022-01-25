@@ -25,7 +25,7 @@ module T = struct
     sparse_dir : string;
     (** subdir which contains sparse file data and sparse file map *)
     upper_dir : string;
-    (** subdir which contains the suffix file, and offset file *)
+    (** subdir which contains the suffix data file, and offset file *)
   }
   [@@deriving sexp]
 end

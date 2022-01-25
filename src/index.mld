@@ -28,6 +28,34 @@ many serialized objects).
 [ a sparse file ] + [ a suffix file ]
 v}
 
+The suffix file is also referred to as the "upper" file, and there may be a "lower" file
+which contains all information before the suffix offset (so, the lower contains everything
+in the sparse file, and more).
+
+NOTE although we talk about a "sparse file" and a "suffix file", in fact the
+implementation of a sparse file involves two files (one for the "data" and one for the map
+file to translate original offsets to offsets within the sparse file), as does the
+implementation of a suffix file. So, a sparse file is actually implemented by a directory
+containing two files (similarly for a suffix file).
+
+{b A control file} is used to indicate which is the current sparse+suffix. The control
+file is defined as (see {!Sparse_file_lib.Io_control}):
+
+{[
+  type t = {
+    generation : int;
+    (** generation is incremented on every GC completion, to signal that
+        RO instances should reload *)
+    sparse_dir : string;
+    (** subdir which contains sparse file data and sparse file map *)
+    upper_dir : string;
+    (** subdir which contains the suffix data file, and offset file *)
+  }
+]}
+
+Thus, {b the control file points to the current sparse and upper}. The control file is
+updated atomically, via rename, when switching to a new sparse+suffix.
+
 
 {1 Approach: implement at the file level as far as possible}
 
@@ -143,10 +171,12 @@ the original pack file we call "absolute" or "virtual".
 
 When we decide we want to create a new sparse+upper, we select a recent commit
 (historically called the "freeze commit"), get the absolute offset of the commit, and
-launch a separate worker process to do (most of) the work. This worker process will create
-a new sparse file and a new upper file and then terminate successfully. Aside: The worker
-will use [fadvise] and various other techniques to avoid disturbing the FS cache for the
-main process.
+launch a separate worker process to do (most of) the work. This worker process will
+calculate the on-disk live reachable objects, create a new sparse file and a new upper
+file, and a new control file, and then terminate successfully. 
+
+Aside: The worker will use [fadvise] and various other techniques to avoid disturbing the
+FS cache for the main process.
 
 The worker completes the following steps in order (see {!Sparse_file_lib.Worker.run_worker}):
 
@@ -166,10 +196,11 @@ The worker completes the following steps in order (see {!Sparse_file_lib.Worker.
 NOTE that only the first step requires any knowledge of Irmin; the other steps involve
 pure filesystem operations, copying data between files etc.
 
-Once the worker terminates, the main Tezos thread pack file detects that the worker has
-finished, and atomically switches to use the [new_sparse_fn] and [new_upper_fn] (and the
-extended lower file, if any). This happens also in any RO processes. This is invisible to
-the higher layers of the Irmin/Tezos node.
+Once the worker terminates, the main process detects that the worker has finished. The
+main process then loads the next-control file, copies to the next-upper any new bytes that
+have been written to current-upper, and atomically switches to use the next-sparse and
+next-upper (and the extended lower file, if any). This happens also in any RO
+processes. This is invisible to the higher layers of the Irmin/Tezos node.
 
 Aside: In order to control the RO processes, we likely have a "control" file, which
 consists of a generation number (which gets bumped when we switch) and the filenames of
@@ -177,6 +208,17 @@ the current sparse file and upper file.
 
 NOTE we refer to this process of creating a new sparse+upper as "GC", "sparsification",
 "freezing".
+
+{1 Crash-resistant behaviour}
+
+What happens if a crash occurs while the worker is executing? The worker is in the process
+of constructing the next sparse+upper. When the worker terminates, the main process will
+atomically switch to using the next files, and this involves atomically renaming the
+next-control over the current-control.
+
+If there is a crash, before the next-control is renamed over the current-control, then on
+restart the files created by the worker will be deleted. Presumably another GC will be
+initiated soon.
 
 
 {1 File dependencies}
@@ -186,10 +228,9 @@ See {!Sparse_file_lib} for the structure of the modules into layers.
 
 {1 Previous documents}
 
-@see <https://github.com/tomjridge/public_notes/blob/master/2022-01-11_tjr_irmin_gc.pdf> "Implementing GC for Irmin", describes the basic structure of a pack file, what a sparse file is, etc
-
-@see <https://github.com/ngoguey42/irmin/blob/rfc-obls/offset_based_layered_store.md> "Offset-based layered store", proposal by [@ngoguey]
-
-@see <https://docs.google.com/presentation/d/e/2PACX-1vR6C-haCfJcosL7dz-QvjStSazjiKyz0aRCpcqImU10yNgVm0Fbu4pvfx2HaP4pJ2ENbgLuBquEm3Nq/pub?start=false&loop=false&delayms=3000> Slides to present the proposal
-
-@see <https://github.com/tomjridge/sparse-file> An implementation of a sparse file, suffix file, worker process, irmin simulation.
+The following should be linked from the main google doc {{: https://docs.google.com/document/d/1UjKMNEKgB4Iee8drlhMJLONiom5XTOkM1g4DJv0UZ0I/edit#}here}
+- {{: https://github.com/tomjridge/public_notes/blob/master/2022-01-11_tjr_irmin_gc.pdf}Implementing GC for Irmin}, describes the basic structure of a pack file, what a sparse file is, etc
+- {{: https://github.com/ngoguey42/irmin/blob/rfc-obls/offset_based_layered_store.md}Offset-based layered store}, proposal by [@ngoguey]
+- {{: https://docs.google.com/presentation/d/e/2PACX-1vR6C-haCfJcosL7dz-QvjStSazjiKyz0aRCpcqImU10yNgVm0Fbu4pvfx2HaP4pJ2ENbgLuBquEm3Nq/pub?start=false&loop=false&delayms=3000}Slides}
+  to present the proposal
+- {{: https://github.com/tomjridge/sparse-file}An implementation} of a sparse file, suffix file, worker process, irmin simulation.
