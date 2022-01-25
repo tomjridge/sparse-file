@@ -1,0 +1,8 @@
+
+
+{2 File dependencies}
+
+No deps: file.ml util.ml irmin_obj.ml
+
+Core: sparse_file.ml suffix_file.ml
+

@@ -20,7 +20,7 @@ module Disk_reachable = struct
   let disk_calc_reachable ~(io:Io.t) ~(off:int) : t =
     log "started disk_calc_reachable";
     let pread = File.Pread.{pread=Io.unsafe_pread io} in
-    (* map from offset to (len,<list of offs immediately reachable from this off) *)
+    (* map from offset to (len,<list of offs immediately reachable from this off>) *)
     let dreach : t = ref Int_map.empty in
     let rec go off = 
       mem off !dreach |> function
@@ -42,8 +42,6 @@ module Disk_reachable = struct
 
 end
 module Dr = Disk_reachable
-
-
 
 let suc_gen_s io = io.Io.ctrl.generation +1 |> Int.to_string
 

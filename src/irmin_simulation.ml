@@ -4,6 +4,11 @@
 
 open Util
 
+(* Shorter aliases/abbrevs *)
+module Sparse = Sparse_file
+module Upper = Suffix_file
+module Control = Io_control
+
 open Irmin_obj
 type irmin_obj = Irmin_obj.t
 
@@ -112,24 +117,22 @@ module Simulation = struct
 
     let handle_worker_termination (t:t) = 
       log "main: handle_worker_termination";
-      (* after termination, we expect the new files to be created as per
-         current control.generation +1 (say, 1235); we use the existence
-         of control.1235 -- to be renamed to control -- as the
-         indication that all these files exist *)
+      (* after termination, we expect the new files to be created as per current
+         control.generation +1 (say, 1235); we use the existence of control.1235 -- to be
+         renamed to control -- as the indication that all these files exist *)
       let suc_gen = suc_gen_s t.io in
       let new_ctrl_name = control_s^"."^suc_gen in
       let new_ctrl_pth = Fn.(t.io.root / new_ctrl_name) in
       assert(Sys.file_exists new_ctrl_pth);
       log "handle_worker_termination: loading new control";      
-      let new_ctrl = Control.load new_ctrl_pth in
+      let new_ctrl = Io_control.load new_ctrl_pth in
       log "handle_worker_termination: loading new upper";
       let next_upper = Io.open_upper_dir t.io.root new_ctrl.upper_dir in
       let _ = 
-        (* new data is always being written to current upper; we need to
-           ensure it is also copied to next upper *)
-        (* FIXME we should check the case when this code is actually
-           exercised; perhaps insert a "sleepf 1.0" at the end of the
-           worker thread *)
+        (* new data is always being written to current upper; we need to ensure it is also
+           copied to next upper *)
+        (* FIXME we should check the case when this code is actually exercised; perhaps
+           insert a "sleepf 1.0" at the end of the worker thread *)
         let len1 = t.io.upper.size() in
         let len2 = next_upper.Upper.size() in
         match len2 < len1 with
@@ -144,10 +147,11 @@ module Simulation = struct
           ()
       in
       log "handle_worker_termination: loading new sparse";
-      (* FIXME open_sparse_dir should just take a single string? or label as ~dir ~name ?*)
+      (* FIXME open_sparse_dir should just take a single string? or label as ~dir ~name
+         ?*)
       let next_sparse = Io.open_sparse_dir t.io.root new_ctrl.sparse_dir in
-      (* now we perform the switch: rename control.suc_gen over control;
-         mutate t.io.sparse; t.io.upper *)
+      (* now we perform the switch: rename control.suc_gen over control; mutate
+         t.io.sparse; t.io.upper *)
       (* FIXME worker should ensure everything synced before termination *)
       log "main: renaming new control over old control";
       Unix.rename Fn.(t.io.root / new_ctrl_name) Fn.(t.io.root / control_s);
@@ -155,6 +159,7 @@ module Simulation = struct
       t.worker_pid <- None;
       t.io.ctrl <- new_ctrl;
       let old_sparse, old_upper = t.io.sparse,t.io.upper in
+      (* perform the switch *)
       t.io.sparse <- next_sparse;
       t.io.upper <- next_upper;
       Sparse.close old_sparse;
@@ -180,8 +185,8 @@ module Simulation = struct
         | _ -> failwith (P.s "Unexpected pid0 value %d" pid0)
 
     let step t =    
-      (* choose whether to create a commit, a normal object, or initiate
-         GC wrt the last commit *)
+      (* choose whether to create a commit, a normal object, or initiate GC wrt the last
+         commit *)
       t.clock <- t.clock +1;
       check_worker_status t;
       match t.clock with

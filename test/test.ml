@@ -25,11 +25,12 @@ let _ =
     let open Sparse_file.Private.Test() in
     perf_test()
 
+(*
 let _ = 
   if List.mem "region_manager" args then 
     let open Region_manager.Test() in
     ()
-
+*)
 
 let _ = 
   if List.mem "simulation" args then

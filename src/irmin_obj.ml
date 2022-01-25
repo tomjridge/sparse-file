@@ -1,10 +1,5 @@
 open Util
 
-(* Shorter aliases/abbrevs *)
-module Sparse = Sparse_file
-module Upper = Suffix_file
-module Control = Io_control
-
 (** Irmin-like objects; can refer to older objects; typically
     persisted in a file before creating another object (FIXME how is
     this invariant enforced in Irmin, that an older object appears
