@@ -1,18 +1,16 @@
 open Util
 
-(** Irmin-like objects; can refer to older objects; typically
-    persisted in a file before creating another object (FIXME how is
-    this invariant enforced in Irmin, that an older object appears
-    earlier in the data file?) *)
+(** Irmin-like objects; can refer to older objects; typically persisted in a file before
+   creating another object (FIXME how is this invariant enforced in Irmin, that an older
+   object appears earlier in the data file?) *)
 type t = {
   id        : int; (* each obj has an id, for debugging *)
   typ       : [ `Normal | `Commit ];
   ancestors : t list; 
   mutable off : int option; 
-  (* each obj may be persisted, in which case there is an offset in
-     the file where the obj is stored; if an offset is Some, then all
-     ancestors must also have been written to disk, so their offsets
-     will also be Some *)
+  (* each obj may be persisted, in which case there is an offset in the file where the obj
+     is stored; if an offset is Some, then all ancestors must also have been written to
+     disk, so their offsets will also be Some *)
 }
 
 let is_saved obj = obj.off <> None
@@ -32,9 +30,8 @@ end
 
 let get_off obj = obj.off |> Option.get
 
-(* NOTE it is extremely inefficient to try to load objects from disk
-   without knowing how long they are; we bypass this problem by
-   writing the object length with the object *)
+(* NOTE it is extremely inefficient to try to load objects from disk without knowing how
+   long they are; we bypass this problem by writing the object length with the object *)
 
 let save io (obj:t) = 
   assert(obj.ancestors |> List.for_all is_saved);

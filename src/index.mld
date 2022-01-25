@@ -1,8 +1,197 @@
+{0 Sparse-file package}
+
+{1 Introduction}
+
+This package implements two file-related concepts:
+
+- A sparse file (see {!Sparse_file_lib.Sparse_file}): from a normal file, a sparse file stores some of the
+  data before a given offset; the data stored is typically the "live data" before that
+  offset; the non-live data is not stored.
+- A suffix file (see {!Sparse_file_lib.Suffix_file}): from a normal file, the suffix file stores all data
+  from a given offset
+
+These are, in turn, used to simulate a huge Irmin [store.pack] file (a file containing
+many serialized objects).
+
+{v
+
+[ a big irmin store.pack file ]
+
+  is simulated by
+
+[ a sparse file ] + [ a suffix file ]
+v}
+
+
+{1 Approach: implement at the file level as far as possible}
+
+The general approach is to try to do as much work as possible at the file level. 
+
+{v
+Irmin stack:
+
+  Layer 
+  |
+  v
+  Layer
+  |
+  v
+  IO.t    <-- this layer is responsible for handling file IO
+v}
+
+We want to do as much work as possible in the "IO.t" layer. In fact, there are many files
+involved, but we only want to work with the "store.pack" file itself - index, dictionary
+etc. can remain unchanged.
+
+
+{v
+Irmin files:
+
+- store.pack  <- store.pack is the file we are interested in
+- store.branches
+- store.dict
+- index-log
+- index-log_async
+- ...
+v}
+
+The idea is to simulate a huge pack file with a number of other files:
+
+{v
+
+[[obj][obj]...[commit]...<objs after commit>...]  <- a potentially huge pack file
+
+  is simulated by:
+
+[sparse file] [(optional) lower file] [upper file]
+v}
+
+
+The upper file (or "suffix file") is just a direct copy of the
+contents of the pack file from [commit].
+
+{v
+[upper file] = [[commit] ...<objs after commit>...]
+v}
+
+For archive stores, the lower file contains everything before the commit:
+
+{v
+[lower file] = [[obj][obj]...<upto commit>]
+v}
+
+For rolling nodes, there will be no lower file. Possibly there will be
+other variants (eg lower file contains part of the data before the
+commit), which we ignore for now.
+
+The sparse file contains all objects reachable from the commit:
+
+{v
+[sparse file] = [[000][obj]...<reachable objs from commit>]
+v}
+
+The sparse file is implemented in a way that it can find objects using
+the original addresses from the original pack file, and so that the
+"gaps" don't take up disk space. In practice, this likely involves
+some [int->int] map, to relate original offsets to real offsets within
+the sparse file.
+
+Let's ignore the lower file for the time being. The combination of
+sparse file and upper file "behaves the same as" the huge pack file
+(provided we don't try to access objects earlier than commit which are
+not stored in the sparse file).
+
+{v
+[[obj][obj]...[commit]...<objs after commit>...]  <- original pack file
+
+  is simulated by
+
+[[000][obj]...][[commit]...<objs after commit>...]
+\____________/ \________________________________/
+ sparse file    upper file (suffix file)
+v}
+
+At some point, the upper file becomes large, so we choose a recent
+commit in upper, and construct a new sparse file and new upper file
+(all without blocking the main Tezos node process), and finally switch
+to the new sparse+upper.
+
+{v
+
+When the upper gets large:
+
+[sparse file][[old freeze commit] ... [new freeze commit]...]
+\____________________________________/\____________________/
+ form a new sparse file from this      new upper from this
+ 
+ NOTE New sparse file contains all 
+ reachable objs from new freeze commit
+
+v}
+
+A key point is that the store.pack file exposes offsets for the
+"original pack file", even though these won't correspond to real
+offsets in the sparse file or the upper file. Offsets that refer to
+the original pack file we call "absolute" or "virtual".
+
+{2 Worker implementation}
+
+When we decide we want to create a new sparse+upper, we select a recent commit
+(historically called the "freeze commit"), get the absolute offset of the commit, and
+launch a separate worker process to do (most of) the work. This worker process will create
+a new sparse file and a new upper file and then terminate successfully. Aside: The worker
+will use [fadvise] and various other techniques to avoid disturbing the FS cache for the
+main process.
+
+The worker completes the following steps in order (see {!Sparse_file_lib.Worker.run_worker}):
+
++ [disk_calc_reachable]: from the freeze commit, for each object reachable (ignoring
+  commit parents) from that commit, determine the absolute offset and length of that
+  object on disk (see {!Sparse_file_lib.Worker.Disk_reachable.disk_calc_reachable})
++ [create_sparse_file]: using the data from the previous step construct a new sparse
+  file [new_sparse_fn] (see {!Sparse_file_lib.Worker.create_sparse_file})
++ [append_to_lower]: if lower exists, append all data before the new commit
++ [create_upper_file]: copy all data in current upper into a new upper file
+  [new_upper_fn]; this will include any bytes written by the main process whilst the
+  worker was completing previous steps; see {!Sparse_file_lib.Worker.create_upper_file}
++ [create_control_file]: create the next control file, with pointers to the new
+  sparse file and upper file; see {!Sparse_file_lib.Worker.create_control_file}    
++ worker terminates
+
+NOTE that only the first step requires any knowledge of Irmin; the other steps involve
+pure filesystem operations, copying data between files etc.
+
+Once the worker terminates, the main Tezos thread pack file detects that the worker has
+finished, and atomically switches to use the [new_sparse_fn] and [new_upper_fn] (and the
+extended lower file, if any). This happens also in any RO processes. This is invisible to
+the higher layers of the Irmin/Tezos node.
+
+Aside: In order to control the RO processes, we likely have a "control" file, which
+consists of a generation number (which gets bumped when we switch) and the filenames of
+the current sparse file and upper file.
+
+NOTE we refer to this process of creating a new sparse+upper as "GC", "sparsification",
+"freezing".
 
 
 {2 File dependencies}
 
-No deps: file.ml util.ml irmin_obj.ml
+The code can be understood in a sequence of layers:
 
-Core: sparse_file.ml suffix_file.ml
+- Base: file.ml util.ml irmin_obj.ml
+- Core (depends on Base): sparse_file.ml suffix_file.ml
+- IO (depends on Core): io_control.ml io.ml 
+- Worker (depends on IO): worker.ml
+- Simulation (depends on Worker): irmin_simulation.ml
 
+
+
+{1 Previous documents}
+
+@see <https://github.com/tomjridge/public_notes/blob/master/2022-01-11_tjr_irmin_gc.pdf> "Implementing GC for Irmin", describes the basic structure of a pack file, what a sparse file is, etc
+
+@see <https://github.com/ngoguey42/irmin/blob/rfc-obls/offset_based_layered_store.md> "Offset-based layered store", proposal by [@ngoguey]
+
+@see <https://docs.google.com/presentation/d/e/2PACX-1vR6C-haCfJcosL7dz-QvjStSazjiKyz0aRCpcqImU10yNgVm0Fbu4pvfx2HaP4pJ2ENbgLuBquEm3Nq/pub?start=false&loop=false&delayms=3000> Slides to present the proposal
+
+@see <https://github.com/tomjridge/sparse-file> An implementation of a sparse file, suffix file, worker process, irmin simulation.
