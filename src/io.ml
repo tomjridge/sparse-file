@@ -3,24 +3,29 @@
 
 open Util
 
-(* Shorter aliases/abbrevs *)
-module Sparse = Sparse_file
-module Upper = Suffix_file
-module Control = Io_control
+open struct
+  (* Shorter aliases/abbrevs *)
+  module Sparse = Sparse_file
+  module Upper = Suffix_file
+  module Control = Io_control
 
-type upper = Suffix_file.t
-type sparse = Sparse_file.t                  
-type control = Control.t
+  type upper = Suffix_file.t
+  type sparse = Sparse_file.t                  
+  type control = Control.t
+end
 
-(** NOTE fields are mutable because we swap them out at some point
-    when we switch from the old state to the new state *)
 type t = { 
   root:string; 
   mutable ctrl:control; 
   mutable sparse:sparse; 
   mutable upper:upper 
 }
+(** The root directory should hold the control file and subdirs for sparse and upper. NOTE
+    fields are mutable because we swap them out at some point when we switch from the old
+    state to the new state. *)
 
+
+(**/**)
 let open_sparse_dir root sparse_dir =   
   Sparse.open_ro 
     ~map_fn:Fn.(root / sparse_dir / sparse_dot_map) 
@@ -29,9 +34,9 @@ let open_sparse_dir root sparse_dir =
 let open_upper_dir root upper_dir =
   let suffix_offset = Upper.load_offset Fn.(root / upper_dir / upper_dot_offset) in
   Upper.open_suffix_file ~suffix_offset Fn.(root / upper_dir / upper_dot_data)
+(**/**)
 
 
-(* root is a directory which contains the sparse, upper, freeze control etc *)
 let open_ root = 
   assert(Sys.file_exists root);
   assert(Unix.stat root |> fun st -> st.st_kind = Unix.S_DIR);
@@ -46,8 +51,12 @@ let open_ root =
   log "Loaded upper file";
   log "IO created";
   { root; ctrl; sparse; upper }
+(** [open_ root] opens the file named "control" in the root directory, then using the
+    filenames in the control file, attempts to open the sparse file and suffix file
+    (upper). *)
 
-(** Various functions we need to support in IO for the store.pack file *)
+
+(** Following are various functions we need to support in IO for the store.pack file *)
 
 let size t = Upper.size t.upper
 

@@ -117,6 +117,19 @@ unexpected data; fixing this might be non-trivial to implement. However, for the
 usecase, we can simply forbid this. We allow reading within a region, but we do not allow
 reading across regions, even if the regions may have been adjacent in the original file.
 
+{1 Problems with the Irmin usecase}
+
+One problem with Irmin is that objects can be stored without explicit length
+information. Then trying to decode an object involves starting with a read of [n] bytes,
+trying to decode, and if decoding fails, reading [2*n] bytes etc. until we have enough
+bytes to successfully decode an object. For the sparse file, it may well be that even this
+initial attempt to read [n] bytes cannot succeed, since we only stored exactly then bytes
+used by the particular object.
+
+One possible solution is just to return 0 bytes when attempting to read beyond a
+particular sparse region. Obviously this is not really "semantically correct", but since
+the object should be decoded without touching the zero bytes, no harm should arise.
+
 *)
 
 (* TODO: - maybe strengthen invariants eg no double entries for a given offset *)
