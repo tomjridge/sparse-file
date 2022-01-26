@@ -86,16 +86,16 @@ let create_upper_file ~io ~off =
   Unix.mkdir Fn.(io.root / upper_dot_suc_gen) 0o770; (* FIXME perm? *)
   let upper = Upper.create_suffix_file ~suffix_offset:off Fn.(io.root / upper_dot_suc_gen / upper_dot_data) in
   Upper.save_offset ~off Fn.(io.root / upper_dot_suc_gen / upper_dot_offset);
-  let len = io.upper.size () - off in
-  log (P.s "creating upper file: performing copy len=%d off=%d upper_size=%d" len off (io.upper.size()));
+  let len = Upper.size io.upper - off in
+  log (P.s "creating upper file: performing copy len=%d off=%d upper_size=%d" len off (Upper.size io.upper));
   File.(copy 
-          ~src:Pread.{pread=io.upper.pread} (* from the OLD upper! *)
+          ~src:Pread.{pread=Upper.pread io.upper} (* from the OLD upper! *)
           ~src_off:off
           ~len 
           ~dst:Pwrite.{pwrite=(fd_to_file upper.fd).pwrite} 
           ~dst_off:0);
   log "creating upper file: closing";
-  upper.close()
+  Upper.close upper
 
 (* FIXME maybe create_control_file_dot_n, and take an int? or create_next_ctrl_file; or
    just param all the worker steps with a (root,next_ctrl) *)
@@ -111,17 +111,14 @@ let create_control_file ~io =
 
 let run_worker ~dir ~commit_offset = 
   log (P.s "worker: running with dir=%s commit_offset=%d" dir commit_offset);
-  (* load the control, sparse, upper; traverse from commit_offset and store in new
-     sparse file; create new upper file; terminate *)
+  (* load the control, sparse, upper; traverse from commit_offset and store in new sparse
+     file; create new upper file; terminate *)
   let io = Io.open_ dir in
   log "worker: IO opened";
-  (* load preobj at commit_offset, figure out (off,len) info, construct new sparse
-     file *)
+  (* load preobj at commit_offset, figure out (off,len) info, construct new sparse file *)
   let dreach = Dr.disk_calc_reachable ~io ~off:commit_offset in
-  log "worker: dreach calculated";
   log (P.s "worker: calculated disk reachable objects for offset %d" commit_offset);
-  (* now create the sparse file for <commit_offset, given the reachable objects *)
-  create_sparse_file ~io ~dreach:dreach;
+  create_sparse_file ~io ~dreach;
   log "worker: sparse file created";
   (* and create the new upper file >= commit_offset *)
   create_upper_file ~io ~off:commit_offset;

@@ -24,3 +24,4 @@ module Worker = Worker
 (** {1 Simulation of Irmin process} *)
 
 module Irmin_simulation = Irmin_simulation
+

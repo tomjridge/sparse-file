@@ -49,6 +49,11 @@ module Private_util = struct
 
     let pwrite_substring ~off ~str ~str_off ~str_len =
       pwrite_string ~off (String.sub str str_off str_len)
+
+    module With_size(S:sig val size: unit -> int end) = struct
+      open S
+      let append (bs:bytes) = pwrite ~off:(ref (size())) bs
+    end
   end
 
   (** Functions we can implement given pread *)

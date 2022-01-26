@@ -75,7 +75,7 @@ module Simulation = struct
              commit, store in a new sparse file, calculate a new upper, and then switch
              Io.t *)
           (* first, make sure upper is flushed, so worker can read the commit at commit_offset *)
-          t.io.upper.fsync();
+          Upper.fsync t.io.upper;
           let `Pid pid = Worker.fork_worker ~dir:t.io.root ~commit_offset:(Irmin_obj.get_off obj) in
           t.worker_pid <- Some pid
 
@@ -133,15 +133,15 @@ module Simulation = struct
            copied to next upper *)
         (* FIXME we should check the case when this code is actually exercised; perhaps
            insert a "sleepf 1.0" at the end of the worker thread *)
-        let len1 = t.io.upper.size() in
-        let len2 = next_upper.Upper.size() in
+        let len1 = Upper.size t.io.upper in
+        let len2 = Upper.size next_upper in
         match len2 < len1 with
         | false -> ()
         | true -> 
           log "handle_worker_termination: extending new upper";
           (* need to append bytes from end of t.io.upper to next_upper *)
-          let pread = File.Pread.{pread=t.io.upper.pread} in
-          let pwrite = File.Pwrite.{pwrite=next_upper.pwrite} in
+          let pread = File.Pread.{pread=Upper.pread t.io.upper} in
+          let pwrite = File.Pwrite.{pwrite=Upper.pwrite next_upper} in
           let len = len1 - len2 in
           File.copy ~src:pread ~dst:pwrite ~src_off:(len1-len) ~len ~dst_off:len2;
           ()
@@ -163,7 +163,7 @@ module Simulation = struct
       t.io.sparse <- next_sparse;
       t.io.upper <- next_upper;
       Sparse.close old_sparse;
-      old_upper.close ();
+      Upper.close old_upper;
       remove_old_files ~new_ctrl;
       ()
 
@@ -219,7 +219,7 @@ module Simulation = struct
         (* FIXME perhaps change ~suffix_offset to just ~off *)
         let up = Upper.create_suffix_file ~suffix_offset:0 Fn.(root / ctrl.upper_dir / upper_dot_data) in
         Upper.save_offset ~off:0 Fn.(root / ctrl.upper_dir / upper_dot_offset);        
-        up.close()
+        Upper.close up
       in    
       (* open the IO we just created *)
       let io = Io.open_ root in

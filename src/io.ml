@@ -49,14 +49,14 @@ let open_ root =
 
 (** Various functions we need to support in IO for the store.pack file *)
 
-let size t = t.upper.size()
+let size t = Upper.size t.upper
 
-let append t bs = t.upper.append bs
+let append t bs = Upper.append t.upper bs
 
 let pread t : off:int ref -> len:int -> buf:bytes -> (int,unit) result = 
   fun ~off ~len ~buf ->
   match !off >= t.upper.suffix_offset with
-  | true -> Ok (t.upper.pread ~off ~len ~buf)
+  | true -> Ok (Upper.pread t.upper ~off ~len ~buf)
   | false -> 
     (* need to pread in the sparse file *)
     Sparse.translate_vreg t.sparse ~virt_off:!off ~len |> function
