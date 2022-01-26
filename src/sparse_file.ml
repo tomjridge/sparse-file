@@ -2,37 +2,184 @@
 
 (**
 
-NOTE there is a "region manager" whose job is to coalesce regions, and
-check subregions are not added twice. This should be used to calculate
-the set of regions which are then copied to the sparse file.
+{1 Introduction}
 
-{2 Use of the sparse file} 
+A sparse file is a concept from file systems, where a file may have "gaps" which don't
+consume space on disk; see e.g. {{: https://en.wikipedia.org/wiki/Sparse_file}wikipedia}.
 
-When we come to use the sparse file, in our setting, we should never
-touch any of the "gap" regions. For example, for the sparse file:
+What does generic mean? Usually sparse files only allow blocks within the file to be
+sparse; it is not possible to have a sparse region with a size less than a block for
+example. In order to implement GC for Irmin, we want a "generic sparse file", where
+objects on disk that are unreachable are replaced with sparse gaps, which are typically
+small regions of 100 to 200 bytes. Thus, block-level sparse files are not sufficient, and
+we need to allow small regions to be sparse.
 
-{[ [aaa][000][bbb]... ]}
+{1 Irmin usecase}
 
-If we copy from the "a" region, we can either start at the beginning,
-or somewhere in the middle, and copy up to the end, but we should
-never copy bytes from the following "0" region.
+The Irmin usecase requires, given a file and a list of live regions (where a region is
+denoted by an offset, length pair [(off,len)]), to construct a sparse version of the file
+containing only the data for the live regions, but still allowing each live region to be
+accessed by the original offset. Once a sparse file is created, it is accessed in RDONLY
+mode (so, no updates are made after initial creation of the sparse file).
 
-At the moment, this is enforced by the sparse file: attempting to use
-[find_vreg] to translate a virtual region to a real region in the
-sparse file will return None. The region manager cannot enforce this
-either, because the region manager is concerned only with the creation
-of the sparse file, not the subsequent copying from the sparse file.
+{1 Example}
+
+Suppose we have the original file, which stores objects:
+
+{v File: [aaa][bbb][ccc][ddd] v}
+
+Suppose object [bbb] is not live. Then the sparse file might look like:
+
+{v Sparse file: [aaa][000][ccc][ddd] v}
+
+Here, the gap is represented by [000].
+
+
+{1 Implementation}
+
+The implementation of a sparse file involves two underlying files: the sparse-data file
+and the sparse-map file. 
+
+{b sparse-data:} This consists of regions of the original file. Continuing the example
+above, we might have: 
+
+{v 
+sparse-file: [aaa][000][ccc][ddd]
+
+  is implemented by 
+
+sparse-data: [ccc][aaa][ddd] 
+sparse-map: ...
+v}
+
+Note that the two original adjacent regions c and d are no longer adjacent in the
+sparse-data file. This is because regions may be added to the sparse file in arbitrary
+order, and no constraints are made that regions must first be coalesced (for example).
+
+{b sparse-map:} This maintains a mapping from "original offset", to "offset in
+sparse-data".
+
+For example, our original file was:
+
+{v
+[aaa][bbb][ccc][ddd] 
+^    ^    ^    ^
+offa |    offc |
+     offb      offd
+v}
+
+Where region a starts at [offa], region b at [offb] etc. In the sparse-data, we might have:
+
+{v
+[ccc][aaa][ddd] 
+^    ^    ^
+oc   oa   od
+v}
+
+i.e., region c starts at real offset [oc] in the sparse-data file, etc.
+
+The sparse-map contains the entries:
+
+{v
+Original offset | Real offset in sparse-data
+--------------------------------------------
+offa            | oa
+offc            | oc
+offd            | od
+v}
+
+Actually, the sparse-map also includes region length information. So, for example, [offa]
+maps to [(oa,lena)], where [lena] is the length of region a. This is so that the sparse
+file can enforce various properties like "don't read across regions" (see below).
+
+
+{1 Creating the sparse file}
+
+From an initially empty sparse file, there is a function {!val:append_region}. See the
+documentation for that function. When finished, the sparse-map must be written to a
+separate file using {!val:save_map}. Then the sparse-data file can be closed.
+
+
+{1 Restrictions on reading from the sparse file}
+
+{b Don't touch gaps:} The basic restriction for our sparse file implementation is that we
+should never attempt to read from the gaps. Thus, if we read from the "a" region, we can
+either start at the beginning, or somewhere in the middle, and copy up to the end, but we
+should never copy bytes from the following "0" region.
+
+{b Don't read across regions:} Consider the region [ [ccc][ddd] ] in the original file,
+which is actually made up of two regions in the sparse file. At the moment, we do not
+enforce that the two regions are stored adjacent in the sparse file: maybe region c is
+added at one point, and much later region d is also added; in this case, region c and
+region d may be stored non-adjacent in the sparse-data file. Thus, attempting to read from
+the beginning of the c region to the end of the d region might naively include lots of
+unexpected data; fixing this might be non-trivial to implement. However, for the Irmin
+usecase, we can simply forbid this. We allow reading within a region, but we do not allow
+reading across regions, even if the regions may have been adjacent in the original file.
 
 *)
 
-(* TODO: 
-
-- X maintain a map of virt_off->(real_off,len)
-- X ability to read within a region
-- strengthen invariants eg no double entries for a given offset
-*)
+(* TODO: - maybe strengthen invariants eg no double entries for a given offset *)
 
 open Util
+
+module type SPARSE = sig
+
+  (* type virt_off := int *)
+  type real_off := int
+  (* type len := int *)
+  type fd := Unix.file_descr
+               
+  type map
+
+  (** The type of sparse files. NOTE The [fd] component is available for reading regions
+      found via [find_vreg] *)
+  type t = private { fd:fd; mutable map:map; readonly:bool }
+
+  val create: string -> t
+  (** Create an empty sparse file (sparse-map is also empty) *)
+
+  (** Open the sparse file, with the given sparse-map from virtual offset to real offset *)
+  val open_ro : map_fn:string -> string -> t
+
+  (** Explicitly save the sparse-map; the map is not automatically saved - it is up to the
+      user to remember to save any updated map before closing the file. *)
+  val save_map: t -> map_fn:string -> unit
+
+  (** [close t] closes the underlying fd; this does not ensure the map is saved; use
+      [save_map] for that. *)
+  val close: t -> unit
+
+  (** [map_add ~virt_off ~real_off ~len] adds a binding from virtual region
+      [(virt_off,len)] to real region [(real_off,len)] *)
+  val map_add: t -> virt_off:int -> real_off:int -> len:int -> unit
+
+  (** [append_region t ~src ~src_off ~len ~virt_off] appends len bytes from fd [src] at
+      offset [src_off], to the end of sparse file t.
+
+      A new map entry [virt_off -> (real_off,len)] is added, where real_off was the real
+      offset of the end of the sparse file before the copy took place.
+
+      NOTE [len] must not be 0; no other validity checks are made on off and len. It is
+      possible to add the same region multiple times for example, or add overlapping
+      regions, etc. {b These usages should be avoided.} FIXME perhaps we should check
+      explicitly for these kinds of problems?
+  *)
+  val append_region: t -> src:fd -> src_off:int -> len:int -> virt_off:int -> unit
+
+  (** [translate_vreg ~virt_off ~len] returns [Some real_off] to indicate that the virtual
+      region [(virt_off,len)] maps to the real region [(real_off,len)] in sparse-data.
+      Returns None if the virtual region is only partially contained in the sparse file,
+      or not contained at all. NOTE it is expected that None is treated like an error,
+      since the user should never be accessing a sparse file region which doesn't
+      exist. *)
+  val translate_vreg: t -> virt_off:int -> len:int -> real_off option
+
+
+  (** Debugging *)
+  val to_string: t -> string
+end
+
 
 module Private = struct
 
@@ -41,18 +188,19 @@ module Private = struct
   module Map_ = struct
     include Int_map
     let load fn = 
-      assert(Sys.file_exists fn);
-      assert( (Unix.stat fn).st_size mod (3*8) = 0 ||
-              failwith (P.s 
-                          "%s: attempted to load int->int*int map \
-                           whose size was not a multiple of 3*8" __FILE__));
       let ints = Small_int_file_v1.load fn in
-      assert(List.length ints mod 3 = 0);
+      let ok = List.length ints mod 3 = 0 in
+      let _check_ints_size = 
+        if not ok then 
+          failwith (P.s "%s: file %s did not contain 3*n ints" __FILE__ fn)
+      in
+      assert(ok);
       (ints,empty) |> iter_k (fun ~k (ints,m) -> 
           match ints with 
           | [] -> m
-          | x::y::z::rest ->
-            let m = add x (y,z) m in
+          | voff::off::len::rest ->
+            (* each set of 3 ints corresponds to voff (virtual offset), off and len *)
+            let m = add voff (off,len) m in
             k (rest,m)
           | _ -> failwith "impossible")
 
@@ -73,12 +221,8 @@ module Private = struct
     end
     module Hr = Human_readable
 
-    let save_hum t fn =
-      t |> bindings |> List.map (fun (voff,(off,len)) -> Hr.{voff;off;len}) |> fun x -> 
-      Hr.save x fn
-
-    (* step through a list of (voff,off,len); sort (voff,len) by voff,
-       and print which regions are not mapped *)
+    (* step through a list of (voff,off,len); sort (voff,len) by voff, and print which
+       regions are not mapped *)
     let debug_vols t = Hr.(
         t |> iter_k (fun ~k xs -> 
             match xs with 
@@ -88,91 +232,32 @@ module Private = struct
               match y.voff = x.voff+x.len with 
               | false -> 
                 Util.log (P.s "Missing region from voff %d of length %d " 
-                       (x.voff+x.len) (y.voff - (x.voff+x.len)));
+                            (x.voff+x.len) (y.voff - (x.voff+x.len)));
                 k (y::rest)
               | true -> 
                 k (y::rest)))            
 
+    let save_hum t fn =
+      t |> bindings |> List.map (fun (voff,(off,len)) -> Hr.{voff;off;len}) |> fun x -> 
+      Hr.save x fn
+
     let load_hum fn =
       Hr.load fn |> fun t -> 
-      debug_vols t; t |> List.map (fun Hr.{voff;off;len} -> (voff,(off,len))) |> List.to_seq |> Int_map.of_seq
-      
+      debug_vols t; t |> List.map (fun Hr.{voff;off;len} -> (voff,(off,len))) |> List.to_seq |> Int_map.of_seq      
   end
-
-
-  module type SPARSE = sig
-    
-    (* type virt_off := int *)
-    type real_off := int
-    (* type len := int *)
-    type fd := Unix.file_descr
-
-    (** The [fd] component is available for reading regions found via
-       [find_vreg] *)
-    type t = private { fd:fd; mutable map:map; readonly:bool }
-
-    val create: string -> t
-      
-    (** Open the sparse file, with the given map from virtual offset to real offset *)
-    val open_ro : map_fn:string -> string -> t
-
-    (** Explicitly save the map; the map is not automatically saved -
-       it is up to the user to remember to save any updated map before
-       closing the file. *)
-    val save_map: t -> map_fn:string -> unit
-
-    (** [close t] closes the underlying fd; this does not ensure the
-        map is saved; use [save_map] for that. *)
-    val close: t -> unit
-
-    (** [map_add ~virt_off ~real_off ~len] adds a binding from virtual
-       region [(virt_off,len)] to real region [(real_off,len)] *)
-    val map_add: t -> virt_off:int -> real_off:int -> len:int -> unit
-
-    (** [append_region t ~src ~src_off ~len ~virt_off] appends len bytes
-        from fd [src] at offset [src_off], to the end of sparse file t.
-
-        [len] must not be 0; no other validity checks are made on off
-        and len.
-
-        A new map entry [virt_off -> (real_off,len)] is added, where
-        real_off was the real offset of the end of the sparse file
-        before the copy took place.
-
-        The lseek position in the src file is changed as a side
-        effect; before the copy starts, the sparse file seek ptr is
-        positioned at the end of the file to ensure we append to the
-        sparse file.
-    *)
-    val append_region: t -> src:fd -> src_off:int -> len:int -> virt_off:int -> unit
-
-    (** [translate_vreg ~virt_off ~len] returns [Some real_off] to indicate
-       that the virtual region [(virt_off,len)] maps to the real
-       region [(real_off,len)].  Returns None if the virtual region is
-       only partially contained in the sparse file, or not contained
-       at all. NOTE it is expected that None is treated like an error,
-       since the user should never be accessing a sparse file region
-       which doesn't exist.  *)
-    val translate_vreg: t -> virt_off:int -> len:int -> real_off option
-
-
-    (** Debugging *)
-    val to_string: t -> string
-  end
-
   
-  (* NOTE if we write data at off1, and then rewrite some different
-     data at off1, both lots of data will be recorded in the sparse
-     file, but only the second lot of data will be accessible at off1;
-     we could add runtime checking to detect this *)
+  (* NOTE if we write data at off1, and then rewrite some different data at off1, both
+     lots of data will be recorded in the sparse file, but only the second lot of data
+     will be accessible at off1; we could add runtime checking to detect this *)
 
-  (* NOTE also that if we write n bytes at off1, and then different
-     data at off1+m, where m<n, we record both lots of data in the
-     sparse file, and each lot of data is accessible, even though this
-     sparse file does not correspond to any proper original file;
-     again we could add runtime checking to detect this *)
+  (* NOTE also that if we write n bytes at off1, and then different data at off1+m, where
+     m<n, we record both lots of data in the sparse file, and each lot of data is
+     accessible, even though this sparse file does not correspond to any proper original
+     file; again we could add runtime checking to detect this *)
 
   module Sparse = struct
+
+    type nonrec map = map
 
     type t = { 
       fd          : Unix.file_descr; 
@@ -244,13 +329,10 @@ module Private = struct
         | true -> 
           Some(roff'+delta)      
 
-
     let pp_ref = ref (fun _ -> failwith "unpatched")
-    let to_string (t:t) : string = !pp_ref t
-    
-  end
 
-  module Check_sparse_sig = (Sparse : SPARSE)
+    let to_string (t:t) : string = !pp_ref t    
+  end
 
 
   (** Debug module, providing conversion of sparse file into string repr *)
@@ -341,35 +423,6 @@ ls -al /tmp/
 
 end
 
-include Private.Sparse
+include (Private.Sparse : SPARSE)
 
 
-
-
-
-(*
-    (* find the end of the region at off1, by looking in the offset
-       map to find the next highest off2; expensive; use only for
-       debug *)
-    let debug_region_end t off1 = 
-      (* take all the off2 values, and
-         find the smallest one larger than map(off1) *)
-      let off2 = 
-        map_find_opt t off1 |> function
-        | Some x -> x
-        | None -> failwith (Printf.sprintf "Unable to find offset %d in map" off1)
-      in
-      let end_ = ref Unix.(lseek t.fd 0 SEEK_END) in
-      t.map |> Map_.iter (fun _k v -> 
-          if v > off2 && v < !end_ then end_:=v else ());
-      !end_
-*)
-
-
-(*
-    (* debug pretty print *)
-    module Show = struct
-
-
-    let to_string = Show.to_string
-*)
