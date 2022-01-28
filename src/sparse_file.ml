@@ -123,12 +123,27 @@ One problem with Irmin is that objects can be stored without explicit length
 information. Then trying to decode an object involves starting with a read of [n] bytes,
 trying to decode, and if decoding fails, reading [2*n] bytes etc. until we have enough
 bytes to successfully decode an object. For the sparse file, it may well be that even this
-initial attempt to read [n] bytes cannot succeed, since we only stored exactly then bytes
-used by the particular object.
+initial attempt to read [n] bytes cannot succeed: [n] bytes is much greater than the
+length of the region holding the object.
+
+The restrictions above (don't touch gaps; don't read across regions) are clearly difficult
+to enforce if the decoder doesn't know the length of the object it is trying to decode.
 
 One possible solution is just to return 0 bytes when attempting to read beyond a
 particular sparse region. Obviously this is not really "semantically correct", but since
 the object should be decoded without touching the zero bytes, no harm should arise.
+
+Consider the example:
+
+{v 
+sparse-data: [ccc][aaa][ddd] 
+v}
+
+If we start trying to read from the beginning of [aaa], we can read [lena] bytes without
+problem. If we read [lena+n] bytes, we should actually receive bytes which look like: [
+[aaa][000] ], i.e., the last [n] bytes are just [0].
+
+{1 OCaml interface}
 
 *)
 
