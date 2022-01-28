@@ -4,25 +4,25 @@
 
 open Util
 
-(* Shorter aliases/abbrevs *)
-module Sparse = Sparse_file
-module Upper = Suffix_file
-module Control = Io_control
+open struct
+  (* Shorter aliases/abbrevs *)
+  module Sparse = Sparse_file
+  module Upper = Suffix_file
+  module Control = Io_control
+end
 
 open Irmin_obj
 type irmin_obj = Irmin_obj.t
 
 
-(** We simulate Irmin: the main process creates a new object every
-   second, with references to previous objects, where some references
-   can be to the same object. Objects are written to disk. Some
-   objects are "commits"; future objects can only reference objects
-   reachable from the most recent commit (or that have been created
-   since then). At some point a recent commit is selected and GC is
-   performed on objects earlier than the commit: only objects
-   reachable from the commit are maintained. The GC is triggered
-   periodically, happens in another process, and should not interrupt
-   the main process.  *)
+(** We simulate Irmin: the main process creates a new object every second, with references
+    to previous objects, where some references can be to the same object. Objects are
+    written to disk. Some objects are "commits"; future objects can only reference objects
+    reachable from the most recent commit (or that have been created since then). At some
+    point a recent commit is selected and GC is performed on objects earlier than the
+    commit: only objects reachable from the commit are maintained. The GC is triggered
+    periodically, happens in another process, and should not interrupt the main
+    process.  *)
 module Simulation = struct
 
   type irmin_obj_set = (int,irmin_obj) Hashtbl.t
@@ -34,14 +34,38 @@ module Simulation = struct
     mutable worker_pid : int option;
     mutable last_commit: irmin_obj option;
     mutable last_commit_objs: irmin_obj_set;
-    (** Reachable objects from last commit *)
     mutable normal_objs_created_since_last_commit: irmin_obj_set;
   }
+  (** This type represents the state of the simulation. 
+
+      [io] is the underlying conbination of sparse+suffix, used to simulate the huge
+      store. 
+
+      [clock] is incremented every step of the simulation. 
+
+      [min_free_id] is the min free id, used when creating a new object (the new object
+      gets this id, and the field is incremented). 
+
+      [worker_pid] is [Some pid] when the worker process is active, [None]
+      otherwise. 
+
+      [last_commit] records the last commit object (which will be the commit used for the
+      GC). 
+
+      [last_commit_objs] are those objects reachable from the last commit; new objects can
+      only reference these reachable objects, and any objects created since the last
+      commit.
+
+      [normal_objs_created_since_last_commit] are those new non-commit objects created
+      since the last commit; new objects can refer to these objects, and any objects
+      reachable from the last commit. *)
 
   let save_object t obj =
     let off = Io.size t.io in
     obj.off <- Some off;
     Irmin_obj.save t.io obj
+  (** Save an object to the underlying [t.io] sparse+suffix files; sets [obj.off] as a
+      side effect. *)
 
   let calc_reachable obj = 
     let set = Hashtbl.create 1000 in
@@ -57,10 +81,14 @@ module Simulation = struct
     in
     go obj;
     set
+  (** Calculate the set of object reachable from a given object *)
 
-  let suc_gen_s io = io.Io.ctrl.generation +1 |> Int.to_string
+  open struct
+    let suc_gen_s io = io.Io.ctrl.generation +1 |> Int.to_string
+  end
 
-
+  (** Steps taken by the main process. At each stage the main process does one of: GC,
+      create object, create commit *)
   module Step = struct
     let gc t =
       match t.worker_pid with 
@@ -112,8 +140,9 @@ module Simulation = struct
   end
   open Step
 
+  (** Implementation of the main process *)
   module Main_process = struct
-    let remove_old_files ~new_ctrl = () (* FIXME TODO *)
+    let remove_old_files ~(new_ctrl:Control.t) = () (* FIXME TODO *)
 
     let handle_worker_termination (t:t) = 
       log "main: handle_worker_termination";
@@ -184,22 +213,17 @@ module Simulation = struct
             | _ -> failwith "Worker terminated abnormally")
         | _ -> failwith (P.s "Unexpected pid0 value %d" pid0)
 
+    let stop_simulation t = t.clock > 250
+      
+    (** At each step the main process chooses one of: GC, create commit, create object. *)
     let step t =    
-      (* choose whether to create a commit, a normal object, or initiate GC wrt the last
-         commit *)
       t.clock <- t.clock +1;
       check_worker_status t;
       match t.clock with
-      | _ when t.clock = 250 -> Unix._exit 0 (* extend this for further testing *)
-      | _ when t.clock mod 41 = 0 -> 
-        (* GC *)
-        gc t
-      | _ when t.clock mod 19 = 0 -> 
-        (* create a commit *)
-        create_commit t
-      | _ -> 
-        (* create a new object *)
-        create_object t
+      | _ when stop_simulation t -> Unix._exit 0 
+      | _ when t.clock mod 41 = 0 -> gc t
+      | _ when t.clock mod 19 = 0 -> create_commit t
+      | _ (* when none of above *) -> create_object t
 
     let run_main () = 
       let root = "./tmp/" in
