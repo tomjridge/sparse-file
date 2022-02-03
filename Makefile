@@ -6,7 +6,7 @@ default: all
 -include Makefile.ocaml
 
 run:
-	time $(DUNE) exec main
+		DONTLOG=src/suffix_file.ml,src/util.ml,read_from_disk,disk_calc_reachable dune exec test/test.exe -- simulation
 
 # for auto-completion of Makefile target
 clean::
