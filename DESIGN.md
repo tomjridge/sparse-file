@@ -166,7 +166,21 @@ This correctness argument uses the "atomic rename" property of filesystems: when
 
 ## Prototype
 
-A prototype of the proposed design can be found at: https://github.com/tomjridge/sparse-file
+A prototype of the proposed design can be found at: https://github.com/tomjridge/sparse-file (the object store is referred to as a "sparse file" in that repository). The code for the worker, for example, looks like the following:
+
+```ocaml
+let run_worker ~dir ~commit_offset = 
+  (* load the control, sparse, upper; traverse from commit_offset and store in new sparse
+     file; create new upper file; terminate *)
+  let io = Io.open_ dir in
+  let dreach = Dr.disk_calc_reachable ~io ~off:commit_offset in
+  create_sparse_file ~io ~dreach;
+  create_upper_file ~io ~off:commit_offset;
+  create_control_file ~io;
+  log "worker: terminating";      
+  ()
+
+```
 
 
 

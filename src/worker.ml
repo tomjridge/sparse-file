@@ -109,6 +109,18 @@ let create_control_file ~io =
   Control.save ctrl Fn.(io.root / "control."^suc_gen);
   ()
 
+(* version without extra comments, logging; for displaying on slides etc *)
+let run_worker ~dir ~commit_offset = 
+  (* load the control, sparse, upper; traverse from commit_offset and store in new sparse
+     file; create new upper file; terminate *)
+  let io = Io.open_ dir in
+  let dreach = Dr.disk_calc_reachable ~io ~off:commit_offset in
+  create_sparse_file ~io ~dreach;
+  create_upper_file ~io ~off:commit_offset;
+  create_control_file ~io;
+  log "worker: terminating";      
+  ()
+
 let run_worker ~dir ~commit_offset = 
   log (P.s "worker: running with dir=%s commit_offset=%d" dir commit_offset);
   (* load the control, sparse, upper; traverse from commit_offset and store in new sparse
