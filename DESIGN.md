@@ -194,6 +194,14 @@ This code matches exactly the informal description of the steps taken by the wor
 
 
 
+## Retaining older objects for archive nodes
+
+Recall that archive nodes contain the complete blockchain history, starting from the genesis block. This results in a huge store pack file, many times larger than main memory. Live objects are distributed throughout this huge file, which makes it difficult for OS caching to work effectively, and as a result, as the store becomes larger and larger, the archive node will become slower. 
+
+In previous versions of the layered store, the design also included a "lower" layer. For archive nodes, the lower layer contained all the objects before the most recent GC commit, whether they were reachable or not - the lower layer was effectively the full prefix of the pack file before the GC commit. One possibility with the new design proposed above is to retain the lower layer, whilst still sticking with the object store + sparse file approach, and preferentially reading from the object store where possible. The advantage (compared with just keeping the full pack file) is that the object store is a dense store of live objects (much denser than the full pack file), which improves OS disk caching, thereby improving performance of snapshot export for recent commits. In addition, the OS can preferentially cache the object store, which improves general archive node performance compared with trying to cache the huge pack file.
+
+
+
 ## Alternative design
 
 The design proposed above scales with "the number of objects reachable from a commit". If this grows increasingly large over time, the proposed design may become unsuitable. An alternative is to use a fully-fledged object store as the storage layer, and implement GC in that layer. This would avoid having to recreate the object-store+suffix file each time. This approach would scale as "the number of objects mutated on each commit".
