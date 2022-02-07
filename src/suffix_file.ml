@@ -81,6 +81,7 @@ let append t buf = pwrite t ~off:(ref (size t)) buf
 
 let fsync t = Unix.fsync t.fd
 
+let _ = pwrite
 
 
 (** We usually want to store the offset in another file, so we provide these helper
